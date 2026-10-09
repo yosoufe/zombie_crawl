@@ -14,6 +14,12 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--num_envs", type=int, default=4)
 parser.add_argument("--seed", type=int, default=0)
 AppLauncher.add_app_launcher_args(parser)
+# Isaac Lab 3.0 removed --headless from the launcher CLI; accept it here for
+# Isaac Lab 2.x-style command lines (it flows through AppLauncher to the launcher).
+parser.add_argument(
+    "--headless", action="store_true", default=False,
+    help="Run headless (no GUI window; the Isaac Lab 3.0 default).",
+)
 args_cli = parser.parse_args()
 args_cli.enable_cameras = False
 app_launcher = AppLauncher(args_cli)

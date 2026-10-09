@@ -68,7 +68,7 @@ state the actor never sees). Two MLPs, both with empirical observation normaliza
 
 | Network | Architecture | Activation | Notes |
 |---------|--------------|------------|-------|
-| **Actor** | `256 → 128 → 64` | ELU | Outputs a **diagonal Gaussian** over the 6-DOF joint-position-offset action. `init_std = 1.0`. |
+| **Actor** | `256 → 128 → 64` | ELU | Outputs a **diagonal Gaussian** over the 6-DOF limits-relative joint-position action. `init_std = 1.0`. |
 | **Critic** | `256 → 128 → 64` | ELU | Value estimate; sees the actor obs **+ 5 privileged dims**. |
 
 **Observations**
@@ -79,8 +79,15 @@ state the actor never sees). Two MLPs, both with empirical observation normaliza
 - **Critic (privileged) extra group — 5-D:** base linear velocity, base height, ground
   friction. Concatenated with the policy group by the runner — this is the "asymmetric" part.
 
-**Action:** 6-D joint **position offsets**, EMA-smoothed (`alpha=0.3`), clipped to joint
-limits, action magnitude clipped to ±1.
+**Action:** 6-D joint **positions** via the **limits-relative** mapping
+(`EMAJointPositionToLimitsAction`) — a raw action in [−1, +1] maps onto each joint's own
+**soft** position limits (−1 = low, +1 = high; with `soft_joint_pos_limit_factor = 0.95`
+that is the middle 95% of each joint's hard range, shrunk symmetrically about the range
+midpoint). The policy can therefore
+command essentially every joint's full range of motion instead of the old fixed ±0.5 rad
+window around the default pose (which covered only 16–45% of each joint's range).
+EMA-smoothed (`alpha=0.3`, state re-initialized to the current joint positions on reset,
+so episodes don't start with a jump); raw magnitude clipped to ±1.
 
 **PPO hyperparameters** (`rsl_rl_ppo_cfg.py`):
 
@@ -97,7 +104,10 @@ limits, action magnitude clipped to ±1.
 **Known model problem.** `init_std = 1.0` on a **±1-clipped** action space puts most of the
 Gaussian's mass outside the clip, so sampled actions saturate (observed raw actions
 `|a| ≈ 18`, clipped to ±1) and the policy gradient through the clip is sparse. A standard
-fix is `init_std ≈ 0.3–0.5`.
+fix is `init_std ≈ 0.3–0.5`. With the limits-relative action space, a saturated raw action
+means the policy is pressing a joint toward its **hard limit**, not toward ±0.5 rad —
+persistent saturation on one joint is now a signal to check the `joint_limits` reward
+weight or that joint's effective range.
 
 ---
 
@@ -143,6 +153,13 @@ likely culprits, in order:
    under-weighted. Rebalance (widen the bell / raise progress weight / lower `v_target_start`).
 3. **Long, rarely-failing episodes:** flat values, low contrast. Consider a tip/instability
    termination or a shorter horizon.
+4. **Action-space coverage (addressed):** the old ±0.5 rad window around the default pose
+   covered only 16–45% of each joint's measured range of motion (gripper bottom edge was
+   exactly its hard limit; wrist_roll 16%), so a gait needing larger excursions was
+   unrepresentable. The action term is now **limits-relative** (§2): raw −1…+1 spans each
+   joint's soft range (95% of the hard range). Note raw 0 now means "soft-range midpoint",
+   not "default pose" — the EMA state is re-initialized to the reset pose, so this only
+   matters as a steady-state bias, not as an episode-start jump.
 
 ---
 
@@ -156,7 +173,7 @@ cd /home/yousof/robotics/experimental/zombie_crawl
 python scripts/train.py --task Zombie-Crawl-SO100-v0 --num_envs 64 --max_iterations 100 --viz kit
 
 # Headless training:
-python scripts/train.py --task Zombie-Crawl-SO100-v0 --num_envs 4096 --max_iterations 3000
+python scripts/train.py --task Zombie-Crawl-SO100-v0 --num_envs 4096 --max_iterations 3000 --headless
 
 # View the robot idle / play a checkpoint:
 python scripts/view_robot.py --viz kit --pose folded --preset servo
@@ -170,6 +187,10 @@ python scripts/play.py --task Zombie-Crawl-SO100-Play-v0 \
 - `--preset servo` (2.9 N·m, real servo) vs `--preset ideal` (10 N·m, separates task-design
   from torque limits).
 - `--pose folded|extended|on_side`.
+- `--headless` runs without a GUI window (on `train.py`/`play.py` and the test helpers).
+  Isaac Lab 3.0 dropped `--headless` from the launcher CLI — headless is the default when
+  no visualizer is requested — so this repo re-adds the flag as a compatibility shim that
+  maps it to the launcher's `HEADLESS=1` env var (and keeps `--viz kit` working for the GUI).
 - Headless `--video` records from scene camera sensors, not the GUI viewport —
   see [docs/video_fix.md](docs/video_fix.md) for how it works and why the old
   viewport-based clips came out frozen.

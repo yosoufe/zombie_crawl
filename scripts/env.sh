@@ -1,7 +1,7 @@
 # Source this before running any zombie_crawl / Isaac Lab script on this host.
 #
 #   source /home/yousof/robotics/experimental/zombie_crawl/scripts/env.sh
-#   python scripts/train.py --task Zombie-Crawl-SO100-v0 --num_envs 64 --max_iterations 100 --headless
+#   python scripts/train.py --task Zombie-Crawl-SO100-v0 --num_envs 64 --max_iterations 100
 #
 # WHY these things are required on THIS machine:
 #

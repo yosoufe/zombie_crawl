@@ -167,14 +167,25 @@ class CrawlCommandsCfg:
 
 @configclass
 class CrawlActionsCfg:
-    """6-D joint position offsets, EMA smoothed, clipped to joint limits by the action term."""
+    """6-D joint position targets via the limits-relative EMA mapping.
 
-    joint_pos = mdp.SmoothedJointPositionActionCfg(
+    ``EMAJointPositionToLimitsAction`` maps a raw action in [-1, +1] onto each joint's own
+    (soft) position limits: -1 = low soft limit, +1 = high soft limit. With the asset's
+    ``soft_joint_pos_limit_factor = 0.95`` the reachable range is the middle 95% of each
+    joint's hard range (shrunk symmetrically about the range midpoint) -- the full measured
+    range of motion, minus a 5% safety margin that also matches the ``joint_limits`` reward.
+    This replaces the old fixed +/-0.5 rad
+    window around the default pose, which covered only 16-45% of each joint's range.
+    The EMA (alpha=0.3) smooths the commanded targets; on reset the EMA state is
+    initialized to the current joint positions, so episodes do not start with a jump.
+    """
+
+    joint_pos = mdp.EMAJointPositionToLimitsActionCfg(
         asset_name="robot",
         joint_names=[".*"],
-        scale=0.5,
-        use_default_offset=True,
-        ema_alpha=0.3,
+        scale=1.0,
+        rescale_to_limits=True,
+        alpha=0.3,
     )
 
 
