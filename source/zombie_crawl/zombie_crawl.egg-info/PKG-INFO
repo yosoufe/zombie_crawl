@@ -1,0 +1,25 @@
+Metadata-Version: 2.4
+Name: zombie_crawl
+Version: 0.1.0
+Summary: SO-ARM100 zombie crawl RL task for Isaac Lab
+Home-page: https://github.com/TheRobotStudio/SO-ARM100
+Author: Zombie Crawl Project
+Maintainer: Zombie Crawl Project
+License: Apache-2.0
+Keywords: extension,rl,isaaclab,locomotion,zombie
+Classifier: Natural Language :: English
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: License :: OSI Approved :: Apache Software License
+Classifier: Operating System :: Unix
+Requires-Python: >=3.10
+Requires-Dist: psutil
+Dynamic: author
+Dynamic: classifier
+Dynamic: home-page
+Dynamic: keywords
+Dynamic: license
+Dynamic: maintainer
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary

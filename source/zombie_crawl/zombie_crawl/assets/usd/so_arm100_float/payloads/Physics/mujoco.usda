@@ -1,0 +1,136 @@
+#usda 1.0
+(
+    customLayerData = {
+        string creator = "URDF USD Converter v0.3.2"
+    }
+    defaultPrim = "so_arm100"
+    endTimeCode = 1000000
+    kilogramsPerUnit = 1
+    metersPerUnit = 1
+    startTimeCode = 0
+    subLayers = [
+        @./physics.usda@
+    ]
+    upAxis = "Z"
+)
+
+over "so_arm100"
+{
+    over "Physics"
+    {
+        over "shoulder_pan" (
+            delete apiSchemas = ["PhysicsDriveAPI:angular", "PhysicsJointStateAPI:angular"]
+            prepend apiSchemas = ["MjcJointAPI"]
+        )
+        {
+        }
+
+        over "shoulder_lift" (
+            delete apiSchemas = ["PhysicsDriveAPI:angular", "PhysicsJointStateAPI:angular"]
+            prepend apiSchemas = ["MjcJointAPI"]
+        )
+        {
+        }
+
+        over "elbow_flex" (
+            delete apiSchemas = ["PhysicsDriveAPI:angular", "PhysicsJointStateAPI:angular"]
+            prepend apiSchemas = ["MjcJointAPI"]
+        )
+        {
+        }
+
+        over "wrist_flex" (
+            delete apiSchemas = ["PhysicsDriveAPI:angular", "PhysicsJointStateAPI:angular"]
+            prepend apiSchemas = ["MjcJointAPI"]
+        )
+        {
+        }
+
+        over "wrist_roll" (
+            delete apiSchemas = ["PhysicsDriveAPI:angular", "PhysicsJointStateAPI:angular"]
+            prepend apiSchemas = ["MjcJointAPI"]
+        )
+        {
+        }
+
+        over "gripper" (
+            delete apiSchemas = ["PhysicsDriveAPI:angular", "PhysicsJointStateAPI:angular"]
+            prepend apiSchemas = ["MjcJointAPI"]
+        )
+        {
+        }
+
+        def MjcActuator "shoulder_pan_actuator"
+        {
+            uniform double[] mjc:biasPrm = [0, -0.01745329238474369, -0.001745329238474369, 0, 0, 0, 0, 0, 0, 0]
+            uniform token mjc:biasType = "affine"
+            uniform double mjc:forceRange:max = 35
+            uniform double mjc:forceRange:min = -35
+            uniform double[] mjc:gainPrm = [0.01745329238474369, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+            uniform token mjc:gainType = "fixed"
+            custom rel mjc:target
+            append rel mjc:target = </so_arm100/Physics/shoulder_pan>
+        }
+
+        def MjcActuator "shoulder_lift_actuator"
+        {
+            uniform double[] mjc:biasPrm = [0, -0.01745329238474369, -0.001745329238474369, 0, 0, 0, 0, 0, 0, 0]
+            uniform token mjc:biasType = "affine"
+            uniform double mjc:forceRange:max = 35
+            uniform double mjc:forceRange:min = -35
+            uniform double[] mjc:gainPrm = [0.01745329238474369, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+            uniform token mjc:gainType = "fixed"
+            custom rel mjc:target
+            append rel mjc:target = </so_arm100/Physics/shoulder_lift>
+        }
+
+        def MjcActuator "elbow_flex_actuator"
+        {
+            uniform double[] mjc:biasPrm = [0, -0.01745329238474369, -0.001745329238474369, 0, 0, 0, 0, 0, 0, 0]
+            uniform token mjc:biasType = "affine"
+            uniform double mjc:forceRange:max = 35
+            uniform double mjc:forceRange:min = -35
+            uniform double[] mjc:gainPrm = [0.01745329238474369, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+            uniform token mjc:gainType = "fixed"
+            custom rel mjc:target
+            append rel mjc:target = </so_arm100/Physics/elbow_flex>
+        }
+
+        def MjcActuator "wrist_flex_actuator"
+        {
+            uniform double[] mjc:biasPrm = [0, -0.01745329238474369, -0.001745329238474369, 0, 0, 0, 0, 0, 0, 0]
+            uniform token mjc:biasType = "affine"
+            uniform double mjc:forceRange:max = 35
+            uniform double mjc:forceRange:min = -35
+            uniform double[] mjc:gainPrm = [0.01745329238474369, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+            uniform token mjc:gainType = "fixed"
+            custom rel mjc:target
+            append rel mjc:target = </so_arm100/Physics/wrist_flex>
+        }
+
+        def MjcActuator "wrist_roll_actuator"
+        {
+            uniform double[] mjc:biasPrm = [0, -0.01745329238474369, -0.001745329238474369, 0, 0, 0, 0, 0, 0, 0]
+            uniform token mjc:biasType = "affine"
+            uniform double mjc:forceRange:max = 35
+            uniform double mjc:forceRange:min = -35
+            uniform double[] mjc:gainPrm = [0.01745329238474369, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+            uniform token mjc:gainType = "fixed"
+            custom rel mjc:target
+            append rel mjc:target = </so_arm100/Physics/wrist_roll>
+        }
+
+        def MjcActuator "gripper_actuator"
+        {
+            uniform double[] mjc:biasPrm = [0, -0.01745329238474369, -0.001745329238474369, 0, 0, 0, 0, 0, 0, 0]
+            uniform token mjc:biasType = "affine"
+            uniform double mjc:forceRange:max = 35
+            uniform double mjc:forceRange:min = -35
+            uniform double[] mjc:gainPrm = [0.01745329238474369, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+            uniform token mjc:gainType = "fixed"
+            custom rel mjc:target
+            append rel mjc:target = </so_arm100/Physics/gripper>
+        }
+    }
+}
+

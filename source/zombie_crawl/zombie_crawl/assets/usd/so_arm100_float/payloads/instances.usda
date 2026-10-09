@@ -1,0 +1,405 @@
+#usda 1.0
+(
+    customLayerData = {
+        string creator = "URDF USD Converter v0.3.2"
+    }
+    endTimeCode = 1000000
+    kilogramsPerUnit = 1
+    metersPerUnit = 1
+    startTimeCode = 0
+    upAxis = "Z"
+)
+
+def Scope "Instances"
+{
+    def Xform "Base" (
+        prepend references = @./geometries.usd@</Geometries/Base>
+    )
+    {
+        over "Base" (
+            apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/Base/VisualMaterials/tn__3d_printed_>
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "tn__3d_printed_" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/tn__3d_printed_>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "Base_1" (
+        prepend references = @./geometries.usd@</Geometries/Base>
+    )
+    {
+        over "Base" (
+            apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI"]
+        )
+        {
+            token physics:approximation = "convexHull"
+            token purpose = "guide"
+        }
+    }
+
+    def Xform "Base_Motor" (
+        prepend references = @./geometries.usd@</Geometries/Base_Motor>
+    )
+    {
+        over "Base_Motor" (
+            apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/Base_Motor/VisualMaterials/sts3215>
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "sts3215" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/sts3215>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "Rotation_Pitch" (
+        prepend references = @./geometries.usd@</Geometries/Rotation_Pitch>
+    )
+    {
+        over "Rotation_Pitch" (
+            apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/Rotation_Pitch/VisualMaterials/tn__3d_printed_>
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "tn__3d_printed_" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/tn__3d_printed_>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "Rotation_Pitch_1" (
+        prepend references = @./geometries.usd@</Geometries/Rotation_Pitch>
+    )
+    {
+        over "Rotation_Pitch" (
+            apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI"]
+        )
+        {
+            token physics:approximation = "convexHull"
+            token purpose = "guide"
+        }
+    }
+
+    def Xform "Rotation_Pitch_Motor" (
+        prepend references = @./geometries.usd@</Geometries/Rotation_Pitch_Motor>
+    )
+    {
+        over "Rotation_Pitch_Motor" (
+            apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/Rotation_Pitch_Motor/VisualMaterials/sts3215>
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "sts3215" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/sts3215>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "Upper_Arm" (
+        prepend references = @./geometries.usd@</Geometries/Upper_Arm>
+    )
+    {
+        over "Upper_Arm" (
+            apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/Upper_Arm/VisualMaterials/tn__3d_printed_>
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "tn__3d_printed_" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/tn__3d_printed_>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "Upper_Arm_1" (
+        prepend references = @./geometries.usd@</Geometries/Upper_Arm>
+    )
+    {
+        over "Upper_Arm" (
+            apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI"]
+        )
+        {
+            token physics:approximation = "convexHull"
+            token purpose = "guide"
+        }
+    }
+
+    def Xform "Upper_Arm_Motor" (
+        prepend references = @./geometries.usd@</Geometries/Upper_Arm_Motor>
+    )
+    {
+        over "Upper_Arm_Motor" (
+            apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/Upper_Arm_Motor/VisualMaterials/sts3215>
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "sts3215" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/sts3215>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "Lower_Arm" (
+        prepend references = @./geometries.usd@</Geometries/Lower_Arm>
+    )
+    {
+        over "Lower_Arm" (
+            apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/Lower_Arm/VisualMaterials/tn__3d_printed_>
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "tn__3d_printed_" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/tn__3d_printed_>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "Lower_Arm_1" (
+        prepend references = @./geometries.usd@</Geometries/Lower_Arm>
+    )
+    {
+        over "Lower_Arm" (
+            apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI"]
+        )
+        {
+            token physics:approximation = "convexHull"
+            token purpose = "guide"
+        }
+    }
+
+    def Xform "Lower_Arm_Motor" (
+        prepend references = @./geometries.usd@</Geometries/Lower_Arm_Motor>
+    )
+    {
+        over "Lower_Arm_Motor" (
+            apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/Lower_Arm_Motor/VisualMaterials/sts3215>
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "sts3215" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/sts3215>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "Wrist_Pitch_Roll" (
+        prepend references = @./geometries.usd@</Geometries/Wrist_Pitch_Roll>
+    )
+    {
+        over "Wrist_Pitch_Roll" (
+            apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/Wrist_Pitch_Roll/VisualMaterials/tn__3d_printed_>
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "tn__3d_printed_" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/tn__3d_printed_>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "Wrist_Pitch_Roll_1" (
+        prepend references = @./geometries.usd@</Geometries/Wrist_Pitch_Roll>
+    )
+    {
+        over "Wrist_Pitch_Roll" (
+            apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI"]
+        )
+        {
+            token physics:approximation = "convexHull"
+            token purpose = "guide"
+        }
+    }
+
+    def Xform "Wrist_Pitch_Roll_Motor" (
+        prepend references = @./geometries.usd@</Geometries/Wrist_Pitch_Roll_Motor>
+    )
+    {
+        over "Wrist_Pitch_Roll_Motor" (
+            apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/Wrist_Pitch_Roll_Motor/VisualMaterials/sts3215>
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "sts3215" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/sts3215>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "Fixed_Jaw" (
+        prepend references = @./geometries.usd@</Geometries/Fixed_Jaw>
+    )
+    {
+        over "Fixed_Jaw" (
+            apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/Fixed_Jaw/VisualMaterials/tn__3d_printed_>
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "tn__3d_printed_" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/tn__3d_printed_>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "Fixed_Jaw_1" (
+        prepend references = @./geometries.usd@</Geometries/Fixed_Jaw>
+    )
+    {
+        over "Fixed_Jaw" (
+            apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI"]
+        )
+        {
+            token physics:approximation = "convexHull"
+            token purpose = "guide"
+        }
+    }
+
+    def Xform "Fixed_Jaw_Motor" (
+        prepend references = @./geometries.usd@</Geometries/Fixed_Jaw_Motor>
+    )
+    {
+        over "Fixed_Jaw_Motor" (
+            apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/Fixed_Jaw_Motor/VisualMaterials/sts3215>
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "sts3215" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/sts3215>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "Moving_Jaw" (
+        prepend references = @./geometries.usd@</Geometries/Moving_Jaw>
+    )
+    {
+        over "Moving_Jaw" (
+            apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/Moving_Jaw/VisualMaterials/tn__3d_printed_>
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "tn__3d_printed_" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/tn__3d_printed_>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "Moving_Jaw_1" (
+        prepend references = @./geometries.usd@</Geometries/Moving_Jaw>
+    )
+    {
+        over "Moving_Jaw" (
+            apiSchemas = ["PhysicsCollisionAPI", "NewtonCollisionAPI", "PhysicsMeshCollisionAPI", "NewtonMeshCollisionAPI"]
+        )
+        {
+            token physics:approximation = "convexHull"
+            token purpose = "guide"
+        }
+    }
+}
+

@@ -1,0 +1,27 @@
+[package]
+
+# Semantic Versioning is used: https://semver.org/
+version = "0.1.0"
+
+# Description
+category = "isaaclab"
+readme  = "README.md"
+
+title = "Zombie Crawl"
+author = "Zombie Crawl Project"
+maintainer = "Zombie Crawl Project"
+description="SO-ARM100 zombie crawl RL task for Isaac Lab"
+repository = "https://github.com/TheRobotStudio/SO-ARM100"
+keywords = ["extension", "rl", "isaaclab", "locomotion", "zombie"]
+
+[dependencies]
+"isaaclab" = {}
+"isaaclab_assets" = {}
+"isaaclab_mimic" = {}
+"isaaclab_rl" = {}
+"isaaclab_tasks" = {}
+
+[[python.module]]
+name = "zombie_crawl"
+
+[isaac_lab_settings]

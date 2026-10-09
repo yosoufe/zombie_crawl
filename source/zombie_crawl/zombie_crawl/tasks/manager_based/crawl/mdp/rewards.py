@@ -1,0 +1,197 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+"""Reward terms for the zombie crawl task.
+
+Convention: all functions return a tensor of shape ``(num_envs,)``. The environment
+must expose ``env.v_target`` (tensor, shape ``(num_envs,)``) -- the current forward
+velocity target -- which is created in ``CrawlEnvCfg.__post_init__`` and optionally
+driven by the curriculum.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import torch
+
+if TYPE_CHECKING:
+    # imported lazily: pulling the concrete env class in at module level drags in
+    # ``pxr`` before SimulationApp is created, which breaks Kit extension loading
+    from isaaclab.envs import ManagerBasedEnv
+from isaaclab.managers import SceneEntityCfg
+from isaaclab.utils import math as math_utils
+
+
+def _base_lin_vel_w(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    return env.scene[asset_cfg.name].data.root_lin_vel_w.torch
+
+
+def _wrap_to_pi(x: torch.Tensor) -> torch.Tensor:
+    return torch.atan2(torch.sin(x), torch.cos(x))
+
+
+def get_v_target(env: ManagerBasedEnv) -> torch.Tensor:
+    """Per-environment forward velocity target (lazily initialized on ``env.v_target``).
+
+    With the curriculum enabled it starts at ``cfg.v_target_start`` and eases toward
+    ``cfg.v_target``; otherwise it is constant at ``cfg.v_target``. If velocity-command
+    tracking is enabled (phase-2 stub) the commanded vx replaces the fixed target.
+    """
+    if not hasattr(env, "v_target") or env.v_target is None:
+        cfg = env.cfg
+        start = cfg.v_target_start if getattr(cfg, "use_curriculum", False) else cfg.v_target
+        # Isaac Lab 3.0: ManagerBasedRLEnv has no ``unwrapped`` property; use num_envs directly
+        env.v_target = torch.full((env.num_envs,), start, device=env.device, dtype=torch.float32)
+    if getattr(env.cfg, "use_velocity_commands", False) and env.command_manager is not None:
+        cmd = env.command_manager.get_command("base_velocity")
+        return cmd[:, 0]
+    return env.v_target
+
+
+def forward_velocity_exp(
+    env: ManagerBasedEnv,
+    std: float = 0.05,
+    min_vel_fraction: float = 0.3,
+    command_name: str | None = None,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Gaussian reward on world-frame +X base velocity around the target velocity.
+
+    Gated on actual forward motion: the reward ramps from 0 at ``min_vel_fraction * v_target``
+    to full weight at ``0.5 * v_target``. Without the gate, a stationary base still earned
+    ``exp(-((0 - t)^2) / std^2) ~= 0.24`` per step, so "sit still and wiggle" beat crawling
+    (the policy collapsed to that local optimum and stayed there for 3000+ iterations).
+    """
+    vx = _base_lin_vel_w(env, asset_cfg)[:, 0]
+    target = get_v_target(env)
+    gate = torch.clamp((vx - min_vel_fraction * target) / (0.2 * target), min=0.0, max=1.0)
+    return gate * torch.exp(-((vx - target) ** 2) / std**2)
+
+
+def forward_progress(
+    env: ManagerBasedEnv,
+    clip: float = 0.05,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Per-step displacement along world +X (clipped to ±clip).
+
+    Displacements larger than 3*clip are treated as episode-boundary jumps (the env was
+    reset between the two measurements) and zeroed.
+    """
+    asset = env.scene[asset_cfg.name]
+    x = asset.data.root_pos_w.torch[:, 0]
+    if not hasattr(env, "zombie_prev_x") or env.zombie_prev_x.shape[0] != x.shape[0]:
+        env.zombie_prev_x = x.clone()
+        return torch.zeros(env.num_envs, device=env.device)
+    dx = x - env.zombie_prev_x
+    env.zombie_prev_x = x.clone()
+    jump_mask = dx.abs() > 3.0 * clip
+    if jump_mask.any():
+        dx[jump_mask] = 0.0
+    return torch.clamp(dx, min=-clip, max=clip)
+
+
+def yaw_error(
+    env: ManagerBasedEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """1 - cos(yaw) of the base heading relative to world +X (0 = aligned, 2 = reversed)."""
+    quat_w = env.scene[asset_cfg.name].data.root_quat_w.torch  # Isaac Lab 3.0: x, y, z, w
+    _, _, yaw = math_utils.euler_xyz_from_quat(quat_w)
+    return 1.0 - torch.cos(_wrap_to_pi(yaw))
+
+
+def lateral_velocity(
+    env: ManagerBasedEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Squared world-frame lateral (Y) base velocity."""
+    vy = _base_lin_vel_w(env, asset_cfg)[:, 1]
+    return vy**2
+
+
+def overspeed_penalty(
+    env: ManagerBasedEnv,
+    factor: float = 2.0,
+    command_name: str | None = None,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Quadratic penalty for world-frame +X velocity above ``factor * v_target``."""
+    vx = _base_lin_vel_w(env, asset_cfg)[:, 0]
+    excess = torch.relu(vx - factor * get_v_target(env))
+    return excess**2
+
+
+def vertical_velocity_l2(
+    env: ManagerBasedEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Squared world-frame vertical base velocity (anti-hop)."""
+    vz = _base_lin_vel_w(env, asset_cfg)[:, 2]
+    return vz**2
+
+
+def base_height_l2(
+    env: ManagerBasedEnv,
+    target_height: float = 0.06,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Squared distance of the base origin height from its resting value (anti-launch)."""
+    z = env.scene[asset_cfg.name].data.root_pos_w.torch[:, 2]
+    return (z - target_height) ** 2
+
+
+def joint_deviation_l2(
+    env: ManagerBasedEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Very weak pull toward the default joint configuration."""
+    asset = env.scene[asset_cfg.name]
+    q = asset.data.joint_pos.torch
+    q0 = asset.data.default_joint_pos.torch
+    return ((q - q0) ** 2).sum(dim=1)
+
+
+def low_ground_contact_bonus(
+    env: ManagerBasedEnv,
+    height_threshold: float = 0.08,
+    decay: float = 0.1,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Optional zombie-style term: reward keeping the base low above the ground."""
+    z = env.scene[asset_cfg.name].data.root_pos_w.torch[:, 2]
+    above = torch.relu(z - height_threshold)
+    return torch.exp(-above / decay)
+
+
+def gait_asymmetry_bonus(
+    env: ManagerBasedEnv,
+    history: int = 50,
+    joint_index: int = 2,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Optional zombie-style term (experimental): reward cyclic joint activity correlated
+    with forward motion. Measures the time-average of ``sign(qdot) * sign(vx)`` over a
+    sliding window; a pull-and-recover gait yields a value near zero while flailing or
+    monotonic spinning yields larger absolute values, so the term rewards *alternation*
+    by penalizing sustained same-sign activity.
+    """
+    asset = env.scene[asset_cfg.name]
+    qdot = asset.data.joint_vel.torch[:, joint_index]
+    vx = _base_lin_vel_w(env, asset_cfg)[:, 0]
+    prod = torch.sign(qdot) * torch.sign(vx)
+    n = env.num_envs
+    state = getattr(env, "zombie_asym_buffer", None)
+    if state is None or state.shape[0] != n:
+        env.zombie_asym_buffer = torch.zeros(n, history, device=env.device)
+        env.zombie_asym_ptr = 0
+        return torch.zeros(n, device=env.device)
+    env.zombie_asym_buffer[:, env.zombie_asym_ptr] = prod
+    env.zombie_asym_ptr = (env.zombie_asym_ptr + 1) % history
+    mean_abs = env.zombie_asym_buffer.abs().mean(dim=1)
+    # 1 at perfect alternation (mean |x| -> 0 with x != 0), 0 at sustained activity
+    active = (env.zombie_asym_buffer.abs() > 0.5).any(dim=1).float()
+    return active * (1.0 - mean_abs.clamp(max=1.0))
