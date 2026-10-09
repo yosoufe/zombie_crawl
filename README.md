@@ -168,15 +168,69 @@ likely culprits, in order:
 ```bash
 source /home/yousof/robotics/experimental/zombie_crawl/scripts/env.sh
 cd /home/yousof/robotics/experimental/zombie_crawl
+```
 
-# Watch it learn (Kit GUI):
-python scripts/train.py --task Zombie-Crawl-SO100-v0 --num_envs 64 --max_iterations 100 --viz kit
+### 1. Smoke test, headless, with video
 
-# Headless training:
-python scripts/train.py --task Zombie-Crawl-SO100-v0 --num_envs 4096 --max_iterations 3000 --headless
+Short run (64 envs, 30 iterations ≈ 2 min of sim) that verifies the full pipeline and
+writes at least one complete training clip. A clip is 500 env steps long, so use
+`--max_iterations 30` (not 2–3) or no clip will finish.
 
-# View the robot idle / play a checkpoint:
+```bash
+python scripts/train.py --task Zombie-Crawl-SO100-v0 \
+    --num_envs 64 --max_iterations 30 --video --headless
+# → logs/rsl_rl/zombie_crawl/<timestamp>/videos/train/train_overview_0000.mp4 (4K)
+```
+
+### 2. Full training, headless, with video
+
+The real run. One ~10 s 3840×2160 overview clip every 25 PPO iterations
+(`keep_last_n_clips=10` caps disk use).
+
+```bash
+python scripts/train.py --task Zombie-Crawl-SO100-v0 \
+    --num_envs 4096 --max_iterations 3000 --video --headless
+```
+
+Notes on `--video`:
+
+- `--video` is what turns recording on; without it no `videos/` directory is created.
+- The source is a SINGLE world-space viewer camera framing the env-grid centre (several
+  robots visible at once), never a per-env camera (that OOMs at 4096). Cost is one 4K
+  viewport render per step and is independent of `--num_envs`.
+- Tune with `--video_length` / `--video_interval` (env steps); resolution/fps come from
+  `CrawlEnvCfg`. Headless frames are fresh (not the old frozen-viewport bug) — see
+  [docs/video_fix.md](docs/video_fix.md).
+
+### 3. GUI mode (watch it live)
+
+In 3.0 the launcher is headless by default; `--viz kit` opens the Kit window (and
+`--headless` forces headless, e.g. to override a visualizer that would otherwise open a
+window — relevant with `--video`). Use a small `--num_envs` so the viewport stays fast;
+only env_0 is rendered regardless.
+
+```bash
+# Watch training in the Kit viewport:
+python scripts/train.py --task Zombie-Crawl-SO100-v0 \
+    --num_envs 64 --max_iterations 100 --viz kit
+
+# Same, but also recording headless overview clips to disk:
+python scripts/train.py --task Zombie-Crawl-SO100-v0 \
+    --num_envs 64 --max_iterations 30 --video --viz kit
+```
+
+### Diagnostics & playback
+
+```bash
+# View the robot idle:
 python scripts/view_robot.py --viz kit --pose folded --preset servo
+
+# Print the joint limits the action term (raw -1..+1) maps onto:
+python scripts/print_action_limits.py
+
+# Physically drive each joint soft-max -> soft-min through the action path:
+python scripts/drive_joint_limits.py --viz kit [--preset servo]
+python scripts/drive_joint_limits.py --no-idle        # headless: exit after the summary
 
 # Record a 20 s video of a checkpoint (two angles: side + top-down):
 python scripts/play.py --task Zombie-Crawl-SO100-Play-v0 \
