@@ -425,10 +425,10 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
     (atan(height / distance) down from horizontal, ~33 deg), not a top-down view. The view
     is anchored on the grid centre (world origin), where envs exist in every direction, so
     several robots are in frame at ~env_spacing regardless of the total env count."""
-    training_video_width: int = 1280
+    training_video_width: int = 3840
     """Viewer image width [px]. One viewport render per captured frame, so this no longer
     scales with num_envs."""
-    training_video_height: int = 720
+    training_video_height: int = 2160
     """Viewer image height [px]."""
 
     def __post_init__(self):
