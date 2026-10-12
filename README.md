@@ -247,7 +247,7 @@ python scripts/play.py --task Zombie-Crawl-SO100-Play-v0 \
 
 - `--preset servo` (2.9 N·m, real servo) vs `--preset ideal` (10 N·m, separates task-design
   from torque limits).
-- `--pose folded|extended|on_side`.
+- `--pose folded` (the only start pose currently defined in `START_POSES`).
 - `--headless` runs without a GUI window (on `train.py`/`play.py` and the test helpers).
   Isaac Lab 3.0 dropped `--headless` from the launcher CLI — headless is the default when
   no visualizer is requested — so this repo re-adds the flag as a compatibility shim that

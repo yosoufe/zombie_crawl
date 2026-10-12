@@ -64,40 +64,18 @@ from zombie_crawl.tasks.manager_based.crawl import video_flags
 ##
 
 START_POSES: dict[str, dict] = {
+    # deep crouch on the jaws: URDF zero position (all joints 0, gripper closed);
+    # spawn z = measured contact-resting height so the robot touches the ground at reset
     "folded": {
-        "pos": (0.0, 0.0, 0.005),
+        "pos": (0.0, 0.0, 0.0037),
         "rot": (0.0, 0.0, 0.0),
         "joint_pos": {
             "shoulder_pan": 0.0,
-            "shoulder_lift": 1.2,
-            "elbow_flex": -1.6,
-            "wrist_flex": 0.3,
+            "shoulder_lift": 0.0,
+            "elbow_flex": 0.0,
+            "wrist_flex": 0.0,
             "wrist_roll": 0.0,
-            "gripper": 0.3,
-        },
-    },
-    "extended": {
-        "pos": (0.0, 0.0, 0.005),
-        "rot": (0.0, 0.0, 0.0),
-        "joint_pos": {
-            "shoulder_pan": 0.0,
-            "shoulder_lift": 0.35,
-            "elbow_flex": -0.35,
-            "wrist_flex": 0.2,
-            "wrist_roll": 0.0,
-            "gripper": 0.3,
-        },
-    },
-    "on_side": {
-        "pos": (0.0, 0.0, 0.048),
-        "rot": (math.pi / 2.0, 0.0, 0.0),
-        "joint_pos": {
-            "shoulder_pan": 0.0,
-            "shoulder_lift": 1.0,
-            "elbow_flex": -1.4,
-            "wrist_flex": 0.3,
-            "wrist_roll": 0.0,
-            "gripper": 0.3,
+            "gripper": 0.0,
         },
     },
 }
@@ -282,10 +260,8 @@ class CrawlEventsCfg:
         mode="reset",
         params={
             "poses": START_POSES,
-            # "on_side" (index 2) starts the robot tipped over and made reorientation the
-            # dominant early task (yaw_error stayed ~-0.5 for the whole run); drop it and
-            # weight "folded" 2:1 over "extended"
-            "pose_weights": (2.0, 1.0, 0.0),
+            # spawn from "folded" only (more poses may be added later)
+            "pose_weights": (1.0,),
             "joint_noise": 0.1,
             "xy_offset": 0.05,
             # +-pi/2 instead of +-pi: a 180-degree turn-off is too costly early in training
@@ -616,7 +592,7 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
         # freeze the friction randomization at the default (multiplier 1.0)
         self.events.randomize_ground_friction.params["friction_range"] = (1.0, 1.0)
         # single, deterministic start pose
-        self.events.reset_start_pose.params["pose_weights"] = (1.0, 0.0, 0.0)
+        self.events.reset_start_pose.params["pose_weights"] = (1.0,)
         self.events.reset_start_pose.params["joint_noise"] = 0.0
         self.events.reset_start_pose.params["xy_offset"] = 0.0
         self.events.reset_start_pose.params["yaw_range"] = (0.0, 0.0)
@@ -649,7 +625,7 @@ class CrawlPlayEnvCfg(CrawlEnvCfg):
         # freeze the friction randomization at the default (multiplier 1.0)
         self.events.randomize_ground_friction.params["friction_range"] = (1.0, 1.0)
         # single, deterministic start pose
-        self.events.reset_start_pose.params["pose_weights"] = (1.0, 0.0, 0.0)
+        self.events.reset_start_pose.params["pose_weights"] = (1.0,)
         self.events.reset_start_pose.params["joint_noise"] = 0.0
         self.events.reset_start_pose.params["xy_offset"] = 0.0
         self.events.reset_start_pose.params["yaw_range"] = (0.0, 0.0)
