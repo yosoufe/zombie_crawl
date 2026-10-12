@@ -35,7 +35,7 @@ def register_crawl_envs() -> None:
     # play variant: same env without curriculum or randomization (deterministic evaluation)
     gym.register(
         id=task_id.replace("-v0", "-Play-v0"),
-        entry_point="isaaclab.envs:ManagerBasedRLEnv",
+        entry_point=f"{__name__}.crawl_env:CrawlPlayRLEnv",
         disable_env_checker=True,
         kwargs={
             "env_cfg_entry_point": f"{__name__}.crawl_env_cfg:CrawlPlayEnvCfg",

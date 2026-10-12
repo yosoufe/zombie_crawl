@@ -172,20 +172,23 @@ cd /home/yousof/robotics/experimental/zombie_crawl
 
 ### 1. Smoke test, headless, with video
 
-Short run (64 envs, 30 iterations ≈ 2 min of sim) that verifies the full pipeline and
-writes at least one complete training clip. A clip is 500 env steps long, so use
-`--max_iterations 30` (not 2–3) or no clip will finish.
+Short run (64 envs) that verifies the full pipeline and writes at least one complete
+training clip. A clip is 2000 env steps long (40 s = two full episodes) and the first one
+starts at iteration 100 (100 + 2000/24 ≈ 184), so use `--max_iterations 200` or no clip
+will finish.
 
 ```bash
 python scripts/train.py --task Zombie-Crawl-SO100-v0 \
-    --num_envs 64 --max_iterations 30 --video --headless
+    --num_envs 64 --max_iterations 200 --video --headless
 # → logs/rsl_rl/zombie_crawl/<timestamp>/videos/train/train_overview_0000.mp4 (4K)
 ```
 
 ### 2. Full training, headless, with video
 
-The real run. One ~10 s 3840×2160 overview clip every 100 PPO iterations (all clips kept on disk)
-(`keep_last_n_clips=10` caps disk use).
+The real run. One ~40 s 3840×2160 overview clip every 100 PPO iterations (all clips kept
+on disk, `keep_last_n_clips=None`). Clips capture every 8th env step (`frame_stride=8` →
+250 frames, 6 fps playback, ~8 GB peak host RAM): the recorder holds raw 4K frames in RAM
+until the clip closes, so a full-rate 2000-step clip (~66 GB) would OOM the machine.
 
 ```bash
 python scripts/train.py --task Zombie-Crawl-SO100-v0 \

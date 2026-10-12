@@ -401,8 +401,8 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
     viewport render per captured frame regardless of ``num_envs`` — no per-env camera tiling,
     no OOM at 4096 envs.
     """
-    training_video_length: int = 500
-    """Clip length in env steps (500 = 10 s at 50 Hz)."""
+    training_video_length: int = 2000
+    """Clip length in env steps (2000 = 40 s at 50 Hz = two full 20 s episodes)."""
     training_video_interval_iters: int = 100
     """Start a new clip every N PPO iterations (converted to env steps with the runner's
     ``num_steps_per_env`` = 24; 100 iters x 24 = 2400 env steps)."""
@@ -573,7 +573,11 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
                 video_length=self.training_video_length,
                 video_interval=self.training_video_interval_iters * 24,
                 output_filename_prefix="train_overview",
-                fps=30,
+                fps=None,  # auto: render_fps/frame_stride = 50 fps at full capture rate
+                # frames are streamed to ffmpeg via zombie_crawl's StreamingVideoRecorder (see
+                # streaming_recorder.py + the patch in the task __init__), so host RAM stays
+                # at ~one frame per clip. Full rate: frame_stride=1 -> smooth 40 s playback.
+                frame_stride=1,
                 step_offset=5,  # skip RTX warm-up frames at the start of each clip
                 keep_last_n_clips=None,  # keep every clip on disk (was 10: the recorder deleted older clips mid-run)
             )
