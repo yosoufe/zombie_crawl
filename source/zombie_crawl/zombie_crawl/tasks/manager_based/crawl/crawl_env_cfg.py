@@ -229,11 +229,13 @@ class CrawlObservationsCfg:
 class CrawlRewardsCfg:
     """Reward terms. Weights are starting points (see docs/training_report.md for tuning notes)."""
 
-    # main: steady forward motion (gated on actual motion: no reward below 30% of v_target)
+    # main: steady forward motion (gated on actual motion: no reward below 30% of v_target).
+    # phase 2: tanh velocity reward (unsaturated gradient at low speed) + 1 Hz low-passed
+    # displacement term at weight 1.0, replacing the saturated bell and the token 0.1 progress term.
     forward_velocity = RewTerm(
-        func=mdp.forward_velocity_exp, weight=1.5, params={"std": 0.05, "min_vel_fraction": 0.3}
+        func=mdp.forward_velocity_exp, weight=1.5, params={"min_vel_fraction": 0.3}
     )
-    forward_progress = RewTerm(func=mdp.forward_progress, weight=0.1, params={"clip": 0.05})
+    forward_progress = RewTerm(func=mdp.forward_progress_lpf, weight=1.0, params={"tau_s": 1.0})
     # keep heading along +X and stay on the line
     yaw_error = RewTerm(func=mdp.yaw_error, weight=-0.5)
     lateral_velocity = RewTerm(func=mdp.lateral_velocity, weight=-1.0)
@@ -249,7 +251,7 @@ class CrawlRewardsCfg:
     joint_torques = RewTerm(func=mdp.joint_torques_l2, weight=-1.0e-5)
     joint_deviation = RewTerm(func=mdp.joint_deviation_l2, weight=-1.0e-3)
     # survival
-    alive = RewTerm(func=mdp.is_alive, weight=0.1)
+    alive = RewTerm(func=mdp.is_alive, weight=0.05)  # phase 2: halved (flat value contrast problem)
     # optional zombie-style terms (disabled by default; enable by setting weight > 0)
     low_ground_contact = RewTerm(func=mdp.low_ground_contact_bonus, weight=0.0)
     gait_asymmetry = RewTerm(func=mdp.gait_asymmetry_bonus, weight=0.0)

@@ -13,6 +13,7 @@ driven by the curriculum.
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import torch
@@ -53,22 +54,28 @@ def get_v_target(env: ManagerBasedEnv) -> torch.Tensor:
 
 def forward_velocity_exp(
     env: ManagerBasedEnv,
-    std: float = 0.05,
+    std: float | None = None,
     min_vel_fraction: float = 0.3,
     command_name: str | None = None,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Gaussian reward on world-frame +X base velocity around the target velocity.
+    """Forward-velocity reward: ``tanh(vx / v_target)``, gated on actual forward motion.
+
+    Phase-2 change: the previous Gaussian bell (``std=0.05`` about ``v_target``) saturated near
+    ~2 cm/s actual speed (exp(-(0.05)^2/0.05^2) ~= 0.37 almost everywhere) and gave the policy
+    almost no gradient toward faster crawling -- the documented Phase-1 bottleneck. tanh(vx/t) is
+    LINEAR at low speed (gradient 1/t per unit velocity) and flattens once the target is reached,
+    so it rewards exactly the crawling speed the task wants without an upper clip. Overspeed beyond
+    2x target is still punished by the overspeed term, so tanh cannot be farmed.
 
     Gated on actual forward motion: the reward ramps from 0 at ``min_vel_fraction * v_target``
     to full weight at ``0.5 * v_target``. Without the gate, a stationary base still earned
-    ``exp(-((0 - t)^2) / std^2) ~= 0.24`` per step, so "sit still and wiggle" beat crawling
-    (the policy collapsed to that local optimum and stayed there for 3000+ iterations).
+    nonzero reward and "sit still and wiggle" beat crawling.
     """
     vx = _base_lin_vel_w(env, asset_cfg)[:, 0]
     target = get_v_target(env)
     gate = torch.clamp((vx - min_vel_fraction * target) / (0.2 * target), min=0.0, max=1.0)
-    return gate * torch.exp(-((vx - target) ** 2) / std**2)
+    return gate * torch.tanh(vx / target)
 
 
 def forward_progress(
@@ -92,6 +99,35 @@ def forward_progress(
     if jump_mask.any():
         dx[jump_mask] = 0.0
     return torch.clamp(dx, min=-clip, max=clip)
+
+
+def forward_progress_lpf(
+    env: ManagerBasedEnv,
+    tau_s: float = 1.0,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Exponentially filtered forward progress (displacement over a ``tau_s``-second window).
+
+    Same unit as velocity: filtered dx / filtered dt. Unlike the instantaneous per-step dx,
+    it cannot be inflated by jerky oscillation (reciprocal motion averages to zero over the
+    window), so it directly shapes the end-of-episode displacement the task is evaluated on.
+    """
+    asset = env.scene[asset_cfg.name]
+    dt = float(env.step_dt)
+    x = asset.data.root_pos_w.torch[:, 0]
+    if not hasattr(env, "zombie_lp_dx") or env.zombie_lp_dx.shape[0] != x.shape[0]:
+        env.zombie_lp_dx = torch.zeros_like(x)
+        env.zombie_lp_dt = torch.zeros_like(x)
+        env.zombie_lp_x0 = x.clone()
+    dx = x - env.zombie_lp_x0
+    jump = dx.abs() > 3.0 * float(getattr(env.cfg, "v_target", 0.1)) * tau_s
+    env.zombie_lp_dx = torch.where(jump, torch.zeros_like(dx), env.zombie_lp_dx + dx)
+    env.zombie_lp_dt = torch.where(jump, torch.zeros_like(dx), env.zombie_lp_dt)
+    env.zombie_lp_x0 = x.clone()
+    decay = math.exp(-dt / tau_s)
+    env.zombie_lp_dx = env.zombie_lp_dx * decay
+    env.zombie_lp_dt = env.zombie_lp_dt * decay + dt
+    return env.zombie_lp_dx / env.zombie_lp_dt
 
 
 def yaw_error(

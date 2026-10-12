@@ -30,9 +30,9 @@ each weighted. Positive terms maximize, negative terms penalize.
 
 | # | Term | Weight | Shape | Plain meaning |
 |---|------|-------:|-------|---------------|
-| 1 | `forward_velocity`  | **+1.5** | `exp(-(vx - v_target)² / 0.05²)` | The main term. Bell-curve bonus peaking when forward (+X) speed equals `v_target`. |
-| 2 | `forward_progress`  | +0.1 | per-step +X displacement, clipped ±0.05 m | Small credit for actually moving forward; capped so it can't be farmed. |
-| 3 | `alive`             | +0.1 | 1.0 each step the episode is alive | Keeps the running score positive. |
+| 1 | `forward_velocity`  | **+1.5** | `tanh(vx / v_target)`, motion-gated | The main term. Linear pull toward `v_target`, flattens once reached; overspeed still punished. |
+| 2 | `forward_progress`  | +1.0 | 1 Hz low-passed +X displacement (τ = 1 s) | Immune to back-and-forth oscillation; shapes end-of-episode displacement directly. |
+| 3 | `alive`             | +0.05 | 1.0 each step the episode is alive | Keeps the running score positive. Phase 2: halved for value contrast. |
 | 4 | `yaw_error`         | −0.5 | `1 − cos(yaw)` vs +X | Penalizes pointing anywhere but straight ahead; full penalty facing backwards. |
 | 5 | `lateral_velocity`  | −1.0 | `vy²` | Penalizes swaying left/right. |
 | 6 | `vertical_velocity` | −2.0 | `vz²` | Anti-hop: penalizes moving up/down. |
@@ -47,17 +47,17 @@ each weighted. Positive terms maximize, negative terms penalize.
 | 15| `low_ground_contact`| 0.0 | *(disabled)* | Optional "stay low to the ground" bonus — off by default. |
 | 16| `gait_asymmetry`    | 0.0 | *(disabled)* | Optional "alternate legs" bonus — off by default. |
 
-**How to read the scale.** The forward-speed bell (weight 1.5) dominates. The
-`v_target` it centers on is **curriculum-driven**: it starts at **0.06 m/s** and eases up
-to **0.10 m/s** as the population learns (see §4). The bell is narrow (std = 0.05 m/s),
-so "right speed" and "not too fast" are two faces of the same hill — the bell provides the
-pull, the `overspeed` wall (at 2× target) stops sprinting.
+**How to read the scale (phase 2).** The main term is now `tanh(vx / v_target)` at
+weight 1.5 (still gated on real motion, still capped by the `overspeed` wall at 2× target):
+**linear** gradient at low speed (d/da = 1/v_target) instead of a saturated Gaussian bell.
+`forward_progress` is now a **1 Hz low-passed displacement** at weight 1.0 — same units as
+velocity, immune to jerky back-and-forth oscillation, shaping end-of-episode displacement
+directly. `v_target` remains curriculum-driven (0.06 → 0.10 m/s, §4).
 
-**A known gradient problem.** At ~1 cm/s actual crawl speed, the main bell is centered at
-0.06 m/s, so it contributes `exp(-(0.05)²/0.05²) ≈ 0.37` nearly constantly — almost
-saturated and giving little gradient. The `forward_progress` term (weight 0.1) carries
-almost no weight. This, plus rarely-failing episodes (§3), is a leading suspect for slow
-learning (see §5).
+**The gradient problem was the phase-1 bottleneck** (bell ≈ 0.37 nearly everywhere at
+~1–2 cm/s, progress term weightless). Phase 2 fixes it with the tanh + LPF design above;
+the phase-1 run (2026-10-12_02-15-00) still reached 0.445 m / 20 s — the phase-2 run
+targets the 1 m / 20 s bar.
 
 ---
 
@@ -217,6 +217,13 @@ python scripts/train.py --task Zombie-Crawl-SO100-v0 \
 # Same, but also recording headless overview clips to disk:
 python scripts/train.py --task Zombie-Crawl-SO100-v0 \
     --num_envs 64 --max_iterations 30 --video --viz kit
+```
+
+### Monitor with TensorBoard
+
+```bash
+tensorboard --logdir logs/rsl_rl/zombie_crawl
+# → http://localhost:6006  (add --port 6007 if busy, or point at a single <run> dir)
 ```
 
 ### Diagnostics & playback
