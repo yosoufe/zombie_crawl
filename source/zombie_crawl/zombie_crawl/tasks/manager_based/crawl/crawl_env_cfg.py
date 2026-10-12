@@ -425,9 +425,9 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
     """
     training_video_length: int = 500
     """Clip length in env steps (500 = 10 s at 50 Hz)."""
-    training_video_interval_iters: int = 25
+    training_video_interval_iters: int = 100
     """Start a new clip every N PPO iterations (converted to env steps with the runner's
-    ``num_steps_per_env`` = 24; 25 iters x 24 = 600 env steps)."""
+    ``num_steps_per_env`` = 24; 100 iters x 24 = 2400 env steps)."""
     training_video_cam_height: float = 4.5
     """Height of the world-space viewer camera above the grid centre [m]."""
     training_video_cam_distance: float = 7.0
@@ -597,7 +597,7 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
                 output_filename_prefix="train_overview",
                 fps=30,
                 step_offset=5,  # skip RTX warm-up frames at the start of each clip
-                keep_last_n_clips=10,
+                keep_last_n_clips=None,  # keep every clip on disk (was 10: the recorder deleted older clips mid-run)
             )
         ]
 

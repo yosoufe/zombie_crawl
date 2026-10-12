@@ -68,7 +68,7 @@ state the actor never sees). Two MLPs, both with empirical observation normaliza
 
 | Network | Architecture | Activation | Notes |
 |---------|--------------|------------|-------|
-| **Actor** | `256 → 128 → 64` | ELU | Outputs a **diagonal Gaussian** over the 6-DOF limits-relative joint-position action. `init_std = 1.0`. |
+| **Actor** | `256 → 128 → 64` | ELU | Outputs a **diagonal Gaussian** over the 6-DOF limits-relative joint-position action. `init_std = 0.4`. |
 | **Critic** | `256 → 128 → 64` | ELU | Value estimate; sees the actor obs **+ 5 privileged dims**. |
 
 **Observations**
@@ -101,7 +101,7 @@ so episodes don't start with a jump); raw magnitude clipped to ±1.
 | `use_clipped_value_loss` | True | `num_mini_batches` | 4 |
 | `max_grad_norm` | 1.0 | `schedule` | adaptive |
 
-**Known model problem.** `init_std = 1.0` on a **±1-clipped** action space puts most of the
+**Known model problem (fixed: `init_std` set to 0.4).** `init_std = 1.0` on a **±1-clipped** action space puts most of the
 Gaussian's mass outside the clip, so sampled actions saturate (observed raw actions
 `|a| ≈ 18`, clipped to ±1) and the policy gradient through the clip is sparse. A standard
 fix is `init_std ≈ 0.3–0.5`. With the limits-relative action space, a saturated raw action
@@ -148,7 +148,7 @@ Enabled by default (`use_curriculum=True`). Two knobs advance as the population 
 Observed: the best checkpoint moves ~1 cm/s and raw actions saturate at the ±1 clip. The
 likely culprits, in order:
 
-1. **`init_std = 1.0` too large** → saturated actions, sparse gradient. Try 0.3–0.5.
+1. **`init_std = 1.0` too large** → saturated actions, sparse gradient. **Fixed: set to 0.4.**
 2. **Weak reward gradient:** main bell nearly saturated at slow speeds; `forward_progress`
    under-weighted. Rebalance (widen the bell / raise progress weight / lower `v_target_start`).
 3. **Long, rarely-failing episodes:** flat values, low contrast. Consider a tip/instability
@@ -184,7 +184,7 @@ python scripts/train.py --task Zombie-Crawl-SO100-v0 \
 
 ### 2. Full training, headless, with video
 
-The real run. One ~10 s 3840×2160 overview clip every 25 PPO iterations
+The real run. One ~10 s 3840×2160 overview clip every 100 PPO iterations (all clips kept on disk)
 (`keep_last_n_clips=10` caps disk use).
 
 ```bash
