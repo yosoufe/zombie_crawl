@@ -29,6 +29,10 @@ class StreamingVideoRecorder(VideoRecorder):
         self._writer = None
         self._clip_frame_count = 0
         self._first_frame = None
+        self._overlay = None
+        self._overlay_failed = False
+        source = getattr(cfg, "source", "") or ""
+        self._overlay_enabled = source.startswith("visualizer")
 
     def step(self) -> None:
         """Same trigger logic as the base class, but frames go to the pipe, not a list."""
@@ -44,11 +48,31 @@ class StreamingVideoRecorder(VideoRecorder):
         if self._recording:
             self._frames_step_count += 1
             if self._frames_step_count % self.cfg.frame_stride == 0:
+                self._update_overlay()
                 frame = self._get_frame()
                 if frame is not None:
                     self._send_frame(frame)
             if self._frames_step_count >= self.cfg.video_length:
                 self._close_clip()
+
+    def _update_overlay(self) -> None:
+        """Draw the commanded-direction (cyan) arrow overlay on the stage."""
+        if not self._overlay_enabled or self._overlay_failed:
+            return
+        try:
+            if self._overlay is None:
+                from .video_overlay import VectorArrowOverlay
+
+                self._overlay = VectorArrowOverlay(self._env)
+                if not self._overlay.setup():
+                    self._overlay, self._overlay_failed = None, True
+                    return
+            self._overlay.update()
+        except Exception:
+            import traceback
+
+            logger.warning("[StreamingVideoRecorder] vector overlay disabled. %s", traceback.format_exc())
+            self._overlay, self._overlay_failed = None, True
 
     def close(self) -> None:
         if self._recording and self._writer is not None:

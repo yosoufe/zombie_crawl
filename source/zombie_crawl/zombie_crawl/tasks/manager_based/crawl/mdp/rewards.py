@@ -35,13 +35,13 @@ def _wrap_to_pi(x: torch.Tensor) -> torch.Tensor:
 
 
 def get_ref_dir(env: ManagerBasedEnv) -> tuple[torch.Tensor, torch.Tensor]:
-    """(cos, sin) of each env's fixed SPAWN heading, written by ``reset_start_pose``.
+    """(cos, sin) of each env's commanded heading, drawn by ``reset_start_pose``.
 
-    All directional rewards/curricula project world velocities onto this direction instead of
-    the world +X axis: spawns are uniformly yaw-randomized and the policy has no heading
-    observation, so the only "forward" it can chase is the direction it was pointing at reset
-    (frozen reference -- following the CURRENT heading would be farmable by spinning).
-    Falls back to world +X before the first reset.
+    The command is uniform +-180 deg, INDEPENDENT of the spawn facing, frozen for the whole
+    episode. All directional rewards/curricula project world velocities onto it; the
+    ``heading_error_wrist`` observation shows the actor where the claw points relative to it.
+    It is a commanded direction, not a heading feedback loop -- it never moves to follow the
+    robot, so turning cannot farm it. Falls back to world +X before the first reset.
     """
     yaw = getattr(env, "zombie_ref_yaw", None)
     if yaw is None or yaw.shape[0] != env.num_envs:
@@ -91,7 +91,7 @@ def forward_velocity_exp(
     vx = _base_lin_vel_w(env, asset_cfg)[:, 0]
     vy = _base_lin_vel_w(env, asset_cfg)[:, 1]
     cos_ref, sin_ref = get_ref_dir(env)
-    vx = vx * cos_ref + vy * sin_ref  # velocity along the fixed SPAWN heading (was: world +X)
+    vx = vx * cos_ref + vy * sin_ref  # velocity along the commanded heading
     target = get_v_target(env)
     gate = torch.clamp((vx - min_vel_fraction * target) / (0.2 * target), min=0.0, max=1.0)
     # backward is a PENALTY, not a free 0: the negative half of tanh is applied ungated,
@@ -113,7 +113,7 @@ def forward_progress(
     asset = env.scene[asset_cfg.name]
     pos = asset.data.root_pos_w.torch
     cos_ref, sin_ref = get_ref_dir(env)
-    x = pos[:, 0] * cos_ref + pos[:, 1] * sin_ref  # position along the SPAWN heading
+    x = pos[:, 0] * cos_ref + pos[:, 1] * sin_ref  # position along the commanded heading
     if not hasattr(env, "zombie_prev_x") or env.zombie_prev_x.shape[0] != x.shape[0]:
         env.zombie_prev_x = x.clone()
         return torch.zeros(env.num_envs, device=env.device)
@@ -140,7 +140,7 @@ def forward_progress_lpf(
     dt = float(env.step_dt)
     pos = asset.data.root_pos_w.torch
     cos_ref, sin_ref = get_ref_dir(env)
-    x = pos[:, 0] * cos_ref + pos[:, 1] * sin_ref  # position along the SPAWN heading
+    x = pos[:, 0] * cos_ref + pos[:, 1] * sin_ref  # position along the commanded heading
     if not hasattr(env, "zombie_lp_dx") or env.zombie_lp_dx.shape[0] != x.shape[0]:
         env.zombie_lp_dx = torch.zeros_like(x)
         env.zombie_lp_dt = torch.zeros_like(x)
@@ -156,20 +156,46 @@ def forward_progress_lpf(
     return env.zombie_lp_dx / env.zombie_lp_dt
 
 
-def yaw_error(
+def wrist_pointing_error(
     env: ManagerBasedEnv,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=("wrist",)),
 ) -> torch.Tensor:
-    """1 - cos(yaw) of the base heading relative to the SPAWN heading (0 = straight, 2 = reversed)."""
-    quat_w = env.scene[asset_cfg.name].data.root_quat_w.torch  # Isaac Lab 3.0: x, y, z, w
+    """1 - cos of the angle between the base->wrist arrow and the COMMAND (0 = aligned, 2 = reversed).
+
+    The pointing vector is the horizontal (XY-projected) arrow from the base origin to the
+    WRIST body origin -- the real claw-pointing direction, unlike the old base-yaw axis, which
+    ignored shoulder_pan (a robot crawling with the arm twisted off its base scored as aligned).
+    The commanded direction is ``zombie_ref_yaw`` (the target velocity is ``v_target`` along it,
+    and the speed magnitude cancels in the cos comparison). Matches the ``heading_error_wrist``
+    observation exactly, so the actor observes what the reward measures.
+
+    Degeneracy guard: with the arm curled the horizontal arrow is near zero and its direction is
+    atan2 noise; there the penalty falls back to the old base-yaw axis (yaw - pi/2), which is
+    always defined and cannot be farmed by curling the arm.
+    """
+    asset = env.scene[asset_cfg.name]
+    wrist_ids = getattr(env, "zombie_wrist_body_ids", None)
+    if wrist_ids is None:
+        ids, _names = asset.find_bodies(list(asset_cfg.body_names), as_proxy=True)
+        wrist_ids = ids.torch.reshape(-1)
+        if wrist_ids.numel() == 0:
+            raise ValueError(f"wrist_pointing_error: no body matching {asset_cfg.body_names}")
+        env.zombie_wrist_body_ids = wrist_ids
+    wrist = asset.data.body_pos_w.torch[:, wrist_ids[0]]
+    base = asset.data.root_pos_w.torch
+    dx = wrist[:, 0] - base[:, 0]
+    dy = wrist[:, 1] - base[:, 1]
+    arrow_yaw = torch.atan2(dy, dx)
+    # fallback axis: base yaw - pi/2 (body -Y, the claw side of the base plate)
+    quat_w = asset.data.root_quat_w.torch  # Isaac Lab 3.0: x, y, z, w
     _, _, yaw = math_utils.euler_xyz_from_quat(quat_w)
+    fallback_yaw = yaw - 0.5 * math.pi
+    valid = torch.hypot(dx, dy) > 0.01
+    pointing_yaw = torch.where(valid, arrow_yaw, fallback_yaw)
     ref = getattr(env, "zombie_ref_yaw", None)
-    if ref is None or ref.shape[0] != yaw.shape[0]:
-        ref = torch.zeros_like(yaw)
-    # compare JAW headings: current jaw axis is base yaw - pi/2 (body -Y), ref is stored
-    # as spawn_yaw - pi/2 -- without the offset here the term sits at 1.0 even when the
-    # robot tracks the reference perfectly, and pulls the body 90 deg off the travel axis
-    return 1.0 - torch.cos(_wrap_to_pi(yaw - 0.5 * math.pi - ref))
+    if ref is None or ref.shape[0] != pointing_yaw.shape[0]:
+        ref = torch.zeros_like(pointing_yaw)
+    return 1.0 - torch.cos(_wrap_to_pi(pointing_yaw - ref))
 
 
 def lateral_velocity(

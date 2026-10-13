@@ -191,7 +191,7 @@ class CrawlObservationsCfg:
 
         projected_gravity = ObsTerm(func=mdp.projected_gravity, noise=Unoise(n_min=-0.05, n_max=0.05))
         # (cos, sin) of the angle between the base->wrist pointing arrow and the frozen
-        # reference axis -- hands the actor the heading error the yaw_error reward uses.
+        # reference axis -- hands the actor the pointing error the wrist_pointing reward uses.
         # NOTE: requires the world-frame wrist position (external localization), so this
         # term is NOT proprioception-only; drop it for a strict sim-to-real transfer.
         heading_err = ObsTerm(func=mdp.heading_error_wrist)
@@ -233,8 +233,8 @@ class CrawlRewardsCfg:
         func=mdp.forward_velocity_exp, weight=1.5, params={"min_vel_fraction": 0.3}
     )
     forward_progress = RewTerm(func=mdp.forward_progress_lpf, weight=1.0, params={"tau_s": 1.0})
-    # keep heading along +X and stay on the line
-    yaw_error = RewTerm(func=mdp.yaw_error, weight=-2.0)
+    # point the claw at the commanded heading and stay on the line
+    wrist_pointing = RewTerm(func=mdp.wrist_pointing_error, weight=-2.0)
     lateral_velocity = RewTerm(func=mdp.lateral_velocity, weight=-1.0)
     # anti-exploit terms
     overspeed = RewTerm(func=mdp.overspeed_penalty, weight=-2.0, params={"factor": 2.0})
@@ -576,6 +576,11 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
         Recording is interval-driven (a new clip every ``training_video_interval_iters``
         iterations, lasting ``training_video_length`` env steps).
         """
+        # CLI override: --video_start_iters N (see video_flags) shifts the first clip off the
+        # default post-warm-up iteration; use 1 to capture a clip immediately (overlay checks).
+        if video_flags.training_video_start_iters is not None:
+            self.training_video_start_iters = int(video_flags.training_video_start_iters)
+            print(f"[INFO] training video start iteration overridden to {self.training_video_start_iters}")
         # Natural ~3/4 view anchored on the grid centre (world origin): camera low and to
         # the -Y side, looking across the centre. The grid is centred on the origin, so
         # several envs (and their robots) are visible around the look-at point.

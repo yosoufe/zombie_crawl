@@ -55,7 +55,8 @@ def reset_start_pose(
     Each pose entry maps a name to ``{"pos": (x, y, z), "rot": (roll, pitch, yaw), "joint_pos": {name: rad}}``.
     On top of the named pose the function adds: a uniform yaw in ``yaw_range``, a small x/y
     offset, uniform joint noise, and zero velocity. The final spawn yaw is stored on
-    ``env.zombie_ref_yaw`` — rewards and curriculum score progress along this frozen direction.
+    ``env.zombie_ref_yaw`` — a uniform +-180 deg COMMAND direction, independent of the spawn
+    facing; rewards and curriculum score progress along it for the whole episode.
     """
     asset: Articulation = env.scene[asset_cfg.name]
     device = asset.device
@@ -83,15 +84,16 @@ def reset_start_pose(
     # note: Isaac Lab 3.0 sample_uniform signature is (lower, upper, size, device)
     yaw = math_utils.sample_uniform(yaw_range[0], yaw_range[1], n, device=device)
     orientations_rpy[:, 2] += yaw
-    # record the final spawn yaw per env: rewards/curriculum score progress along this
-    # fixed direction (the robot has no heading observation, and spawns are uniform).
-    # The reference axis is the JAW axis = base-frame -Y (URDF shoulder at y=-0.045; zero-pose
-    # FK puts the jaw tip at y=-0.15), so store spawn_yaw - pi/2: (cos, sin) of the stored
-    # value then points where the zombie's face points, and it crawls head-first.
-    jaw_axis = orientations_rpy[:, 2] - 0.5 * math.pi
+    # COMMAND the crawl direction: a uniform +-180 deg draw, INDEPENDENT of the spawn
+    # facing. (cos, sin) of this value is the forward axis every directional term scores
+    # against; the heading_error_wrist observation exposes it to the actor as the angle
+    # between the claw arrow and this target, so the policy must turn toward the command
+    # and crawl it (previously the target was frozen to the spawn jaw axis, which made
+    # the "command" derivable from the spawn pose and removed any need to turn).
+    target_yaw = math_utils.sample_uniform(-math.pi, math.pi, n, device=device)
     if not hasattr(env, "zombie_ref_yaw") or env.zombie_ref_yaw.shape[0] != env.num_envs:
         env.zombie_ref_yaw = torch.zeros(env.num_envs, device=device)
-    env.zombie_ref_yaw[env_ids] = torch.atan2(torch.sin(jaw_axis), torch.cos(jaw_axis))
+    env.zombie_ref_yaw[env_ids] = torch.atan2(torch.sin(target_yaw), torch.cos(target_yaw))
     positions[:, 0] += math_utils.sample_uniform(-xy_offset, xy_offset, n, device=device)
     positions[:, 1] += math_utils.sample_uniform(-xy_offset, xy_offset, n, device=device)
     if joint_noise > 0:
@@ -110,7 +112,7 @@ def reset_start_pose(
     # the directional progress rewards cache position along the reference axis; when the
     # ref re-rolls at reset, reseed those caches with the CURRENT projected position --
     # a magnitude-based jump guard alone misses small re-rolls near the world origin
-    cos_j, sin_j = torch.cos(jaw_axis), torch.sin(jaw_axis)
+    cos_j, sin_j = torch.cos(target_yaw), torch.sin(target_yaw)
     p0 = positions[:, 0] * cos_j + positions[:, 1] * sin_j
     for buf_name, val in (("zombie_lp_dx", 0.0), ("zombie_lp_dt", 0.0),
                           ("zombie_lp_x0", p0), ("zombie_prev_x", p0)):

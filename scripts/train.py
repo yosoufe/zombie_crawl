@@ -47,6 +47,19 @@ from isaaclab_rl.entrypoints import run_train_cli
 
 if __name__ == "__main__":
     argv = list(sys.argv[1:])
+    # --video_start_iters N: override the PPO iteration at which the first training clip is
+    # captured (default 500, see CrawlEnvCfg.training_video_start_iters). Accepted in both
+    # "--video_start_iters N" and "--video_start_iters=N" forms; consumed here (the unified
+    # launcher forwards any leftover arg to Hydra, which would reject an unknown flag).
+    for i, a in enumerate(argv):
+        if a == "--video_start_iters" and i + 1 < len(argv):
+            video_flags.training_video_start_iters = int(argv[i + 1])
+            del argv[i : i + 2]
+            break
+        if a.startswith("--video_start_iters="):
+            video_flags.training_video_start_iters = int(a.split("=", 1)[1])
+            argv.pop(i)
+            break
     # see CrawlEnvCfg._setup_training_video: --video adds a single world-space viewer
     # camera + interval-based recorder via the process-local flag (fresh 4K clip every 25 iters)
     if "--video" in argv:

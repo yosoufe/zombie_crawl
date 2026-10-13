@@ -27,3 +27,10 @@ training robots is written every N PPO iterations (see
 :meth:`CrawlEnvCfg._setup_training_video`). This is Isaac Lab's official training-video
 path (how-to: "Recording video clips during training").
 """
+
+training_video_start_iters: int | None = None
+"""When set by ``scripts/train.py`` from ``--video_start_iters N``, overrides
+``CrawlEnvCfg.training_video_start_iters`` (the PPO iteration at which the first clip is
+captured). Use ``--video_start_iters 1`` to record a clip immediately (e.g. to validate the
+vector overlay on an untrained policy) instead of the default post-warm-up iteration.
+"""

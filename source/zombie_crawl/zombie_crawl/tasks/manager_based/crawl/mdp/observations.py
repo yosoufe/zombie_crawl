@@ -56,16 +56,14 @@ def heading_error_wrist(
     env: "ManagerBasedEnv",
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=("wrist",)),
 ) -> torch.Tensor:
-    """Heading error observation: (cos, sin) of the angle between where the robot POINTS
-    and the frozen reference axis.
+    """Commanded-heading observation: (cos, sin) of the angle between where the robot POINTS
+    and the commanded direction.
 
-    The pointing direction is the world-frame horizontal projection of the arrow from the
-    base origin to the WRIST body -- i.e. down the arm toward the jaws -- which is the
-    direction the robot must crawl along. Compared against ``env.zombie_ref_yaw`` (the
-    jaw axis at spawn, see ``mdp.reset_start_pose``), this hands the actor the exact
-    heading error the ``yaw_error`` reward measures, so it can correct drift instead of
-    discovering it only through reward pain. Returns (num_envs, 2); cos/sin are
-    wrap-invariant, so no angle normalization is needed.
+    Pointing direction = world-frame horizontal projection of the arrow from the base origin
+    to the WRIST body (down the arm toward the jaws). ``env.zombie_ref_yaw`` (drawn by
+    ``mdp.reset_start_pose``) is a uniform +-180 deg COMMAND per episode, so this term IS the
+    command signal for the actor: (1, 0) means "point where you must crawl". It matches what
+    the ``wrist_pointing_error`` reward measures. Returns (num_envs, 2); cos/sin are wrap-invariant.
     """
     asset = env.scene[asset_cfg.name]
     wrist_ids = getattr(env, "zombie_wrist_body_ids", None)

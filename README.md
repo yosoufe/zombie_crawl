@@ -16,15 +16,16 @@ Source of truth (all under `source/zombie_crawl/zombie_crawl/tasks/manager_based
 | Observations  | `crawl_env_cfg.py` + `mdp/observations.py` |
 | Curriculum    | `mdp/curriculums.py`                    |
 
-**Coordinates:** world frame, right-handed. +Z = up. The task's forward is the zombie's
-own **jaw axis = base-frame −Y** (the URDF arm chain hangs off `y = −0.045`; zero-pose FK
-puts the jaw tip at y ≈ −0.15, so body +X is 90° off the face). Spawns are **uniformly
-yaw-randomized (±180°)**: there is no privileged world direction. `mdp.reset_start_pose`
-freezes each env's *jaw direction at spawn* (`spawn_yaw − 90°`) into `env.zombie_ref_yaw`,
-and every directional reward/curriculum scores motion along that frozen axis (frozen —
-scoring the *current* heading would be farmable by spinning). Evaluation overrides the
-spawn yaw to 0, so in evals the robot faces and is scored along world **−Y**; `evaluate.py`
-projects displacement and the speed band onto the reference axis.
+**Coordinates:** world frame, right-handed. +Z = up. The robot points along its **jaw axis
+= base-frame −Y** (the URDF arm chain hangs off `y = −0.045`; zero-pose FK puts the jaw tip
+at y ≈ −0.15). Each episode draws a **commanded direction: uniform ±180°, independent of the
+spawn facing**, frozen for the episode in `env.zombie_ref_yaw` by `mdp.reset_start_pose`.
+Every directional reward/curriculum/termination scores motion along that commanded axis,
+and the `heading_error_wrist` observation shows the actor the claw-vs-command angle — so
+the skill is *turn to the command, then crawl it head-first*. The command never follows the
+robot, so turning cannot farm it. Spawn facings stay uniform ±180° (independent of the
+command). Evals force spawn yaw 0; `evaluate.py` scores displacement projected on the
+command axis.
 
 ---
 
@@ -38,7 +39,7 @@ each weighted. Positive terms maximize, negative terms penalize.
 | 1 | `forward_velocity`  | **+1.5** | `tanh(v / v_target)`, gated up, **negative down** | The main term. Pull toward `v_target` along the reference (jaw) axis; flattens once reached; **backward crawling scores negative**, so forward/backward oscillation nets ~zero. |
 | 2 | `forward_progress`  | +1.0 | 1 Hz low-passed displacement along the reference (jaw) axis (τ = 1 s) | Immune to back-and-forth oscillation; shapes end-of-episode displacement directly. |
 | 3 | `alive`             | +0.05 | 1.0 each step the episode is alive | Keeps the running score positive. Phase 2: halved for value contrast. |
-| 4 | `yaw_error`         | −2.0 | `1 − cos(Δyaw)` vs reference (jaw) axis | Penalizes veering off the spawn direction; strong enough that crab-walking (body yawed while travelling along ref) never pays. |
+| 4 | `wrist_pointing`    | −2.0 | `1 − cos(Δyaw)` of base→wrist arrow vs reference axis | Penalizes pointing the claw off the commanded direction (arm-aware, unlike the old base-yaw axis); strong enough that crab-walking never pays. |
 | 5 | `lateral_velocity`  | −1.0 | `vy²` perpendicular to the reference (jaw) axis | Penalizes swaying sideways. |
 | 6 | `vertical_velocity` | −2.0 | `vz²` | Anti-hop: penalizes moving up/down. |
 | 7 | `base_height`       | −1.0 | `(z − 0.005)²` | Anti-launch: penalizes rising off the crouch resting height (~0.5 cm). |
@@ -88,7 +89,7 @@ state the actor never sees). Two MLPs, both with empirical observation normaliza
 joint positions (rel. to the folded default), joint velocities, last action — all
 egocentric — plus **`heading_error_wrist`**: (cos, sin) of the angle between the world-frame
 arrow *base origin → wrist* and the frozen reference axis. The arrow points where the
-robot must crawl, so the actor directly sees the heading error the `yaw_error` reward
+robot must crawl, so the actor directly sees the pointing error the `wrist_pointing` reward
 uses instead of only feeling it. Caveat: this term needs the wrist's *world* position
 (external localization) — it is the only non-proprioceptive observation; remove it for a
 strict sim-to-real policy. Critic-only extras: base linear velocity, base height, ground
