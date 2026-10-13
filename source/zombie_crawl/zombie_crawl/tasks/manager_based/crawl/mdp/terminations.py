@@ -65,21 +65,30 @@ def stalled(
     stall_time_s: float = 12.0,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """True if the base has not crawled ``min_displacement`` along +X within ``stall_time_s``.
+    """True if the base has not crawled ``min_displacement`` along its reference (jaw)
+    axis within ``stall_time_s``.
 
-    Records each env's start x on the first step after reset (when ``episode_length_buf``
-    is still <= 1, i.e. the reset pose has just been applied) and terminates episodes that
-    stall out of their start position. This is a *failure* termination (not a timeout), so
-    the value function treats "doing nothing" as bad rather than as a free ride.
+    Records each env's start position on the first step after reset (when
+    ``episode_length_buf`` is still <= 1) and terminates episodes that stall out of their
+    start position. Displacement is measured along the frozen reference axis, not world
+    +X: with uniform ±180deg spawn yaw a world-axis test kills successful crawlers whose
+    heading happens to be perpendicular to +X. This is a *failure* termination (not a
+    timeout), so the value function treats "doing nothing" as bad rather than as a free ride.
     """
+    from .rewards import get_ref_dir
+
     asset = env.scene[asset_cfg.name]
-    x = asset.data.root_pos_w.torch[:, 0]
-    start_x = getattr(env, "zombie_start_x", None)
-    if start_x is None or start_x.shape[0] != x.shape[0]:
-        env.zombie_start_x = x.clone()
+    pos_xy = asset.data.root_pos_w.torch[:, :2]
+    start_xy = getattr(env, "zombie_start_xy", None)
+    if start_xy is None or start_xy.shape[0] != pos_xy.shape[0]:
+        env.zombie_start_xy = pos_xy.clone()
     else:
         just_reset = env.episode_length_buf <= 1
         if just_reset.any():
-            env.zombie_start_x[just_reset] = x[just_reset]
+            env.zombie_start_xy[just_reset] = pos_xy[just_reset]
+    cos_ref, sin_ref = get_ref_dir(env)
+    dx = (pos_xy[:, 0] - env.zombie_start_xy[:, 0]) * cos_ref + (
+        pos_xy[:, 1] - env.zombie_start_xy[:, 1]
+    ) * sin_ref
     stall_steps = int(round(stall_time_s / (env.cfg.decimation * env.cfg.sim.dt)))
-    return (env.episode_length_buf > stall_steps) & ((x - env.zombie_start_x).abs() < min_displacement)
+    return (env.episode_length_buf > stall_steps) & (dx.abs() < min_displacement)

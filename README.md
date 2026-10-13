@@ -16,10 +16,15 @@ Source of truth (all under `source/zombie_crawl/zombie_crawl/tasks/manager_based
 | Observations  | `crawl_env_cfg.py` + `mdp/observations.py` |
 | Curriculum    | `mdp/curriculums.py`                    |
 
-**Coordinates:** world frame, right-handed. **+X = forward crawl direction**, +Y = lateral,
-+Z = up. The robot's long axis (its "front") points down +X at a yaw-0 spawn. The reward is
-**world-frame**, not robot-body-frame — the robot's own heading is irrelevant; it must
-physically face and move toward +X.
+**Coordinates:** world frame, right-handed. +Z = up. The task's forward is the zombie's
+own **jaw axis = base-frame −Y** (the URDF arm chain hangs off `y = −0.045`; zero-pose FK
+puts the jaw tip at y ≈ −0.15, so body +X is 90° off the face). Spawns are **uniformly
+yaw-randomized (±180°)**: there is no privileged world direction. `mdp.reset_start_pose`
+freezes each env's *jaw direction at spawn* (`spawn_yaw − 90°`) into `env.zombie_ref_yaw`,
+and every directional reward/curriculum scores motion along that frozen axis (frozen —
+scoring the *current* heading would be farmable by spinning). Evaluation overrides the
+spawn yaw to 0, so in evals the robot faces and is scored along world **−Y**; `evaluate.py`
+projects displacement and the speed band onto the reference axis.
 
 ---
 
@@ -30,13 +35,13 @@ each weighted. Positive terms maximize, negative terms penalize.
 
 | # | Term | Weight | Shape | Plain meaning |
 |---|------|-------:|-------|---------------|
-| 1 | `forward_velocity`  | **+1.5** | `tanh(vx / v_target)`, motion-gated | The main term. Linear pull toward `v_target`, flattens once reached; overspeed still punished. |
-| 2 | `forward_progress`  | +1.0 | 1 Hz low-passed +X displacement (τ = 1 s) | Immune to back-and-forth oscillation; shapes end-of-episode displacement directly. |
+| 1 | `forward_velocity`  | **+1.5** | `tanh(v / v_target)`, motion-gated | The main term. Linear pull toward `v_target` along the spawn reference (jaw) axis, flattens once reached; overspeed still punished. |
+| 2 | `forward_progress`  | +1.0 | 1 Hz low-passed displacement along the reference (jaw) axis (τ = 1 s) | Immune to back-and-forth oscillation; shapes end-of-episode displacement directly. |
 | 3 | `alive`             | +0.05 | 1.0 each step the episode is alive | Keeps the running score positive. Phase 2: halved for value contrast. |
-| 4 | `yaw_error`         | −0.5 | `1 − cos(yaw)` vs +X | Penalizes pointing anywhere but straight ahead; full penalty facing backwards. |
-| 5 | `lateral_velocity`  | −1.0 | `vy²` | Penalizes swaying left/right. |
+| 4 | `yaw_error`         | −0.5 | `1 − cos(Δyaw)` vs reference (jaw) axis | Penalizes veering off the spawn direction; full penalty turning around. |
+| 5 | `lateral_velocity`  | −1.0 | `vy²` perpendicular to the reference (jaw) axis | Penalizes swaying sideways. |
 | 6 | `vertical_velocity` | −2.0 | `vz²` | Anti-hop: penalizes moving up/down. |
-| 7 | `base_height`       | −1.0 | `(z − 0.06)²` | Anti-launch: penalizes the base rising above its ~6 cm resting height. |
+| 7 | `base_height`       | −1.0 | `(z − 0.005)²` | Anti-launch: penalizes rising off the crouch resting height (~0.5 cm). |
 | 8 | `orientation`       | −0.5 | L2 of flat-orientation error | Penalizes tilting/rolling off its "belly" orientation. |
 | 9 | `overspeed`         | −2.0 | `relu(vx − 2·v_target)²` | Anti-exploit: quadratic wall once faster than 2× target. |
 | 10| `action_rate`       | −0.01 | `‖a_t − a_{t-1}‖²` | Smoothness: penalizes whipping joints. |
@@ -79,13 +84,25 @@ state the actor never sees). Two MLPs, both with empirical observation normaliza
 - **Critic (privileged) extra group — 5-D:** base linear velocity, base height, ground
   friction. Concatenated with the policy group by the runner — this is the "asymmetric" part.
 
+**Actor observations** (27-D, normalized): projected gravity, base angular velocity,
+joint positions (rel. to the folded default), joint velocities, last action — all
+egocentric — plus **`heading_error_wrist`**: (cos, sin) of the angle between the world-frame
+arrow *base origin → wrist* and the frozen reference axis. The arrow points where the
+robot must crawl, so the actor directly sees the heading error the `yaw_error` reward
+uses instead of only feeling it. Caveat: this term needs the wrist's *world* position
+(external localization) — it is the only non-proprioceptive observation; remove it for a
+strict sim-to-real policy. Critic-only extras: base linear velocity, base height, ground
+friction (asymmetric actor-critic).
+
 **Action:** 6-D joint **positions** via the **limits-relative** mapping
 (`EMAJointPositionToLimitsAction`) — a raw action in [−1, +1] maps onto each joint's own
 **soft** position limits (−1 = low, +1 = high; with `soft_joint_pos_limit_factor = 0.95`
-that is the middle 95% of each joint's hard range, shrunk symmetrically about the range
-midpoint). The policy can therefore
-command essentially every joint's full range of motion instead of the old fixed ±0.5 rad
-window around the default pose (which covered only 16–45% of each joint's range).
+that is the middle 95% of each joint's hard range, shrunk symmetrically about the default
+position, which is the folded spawn). A per-joint `offset` puts **zero action at the folded
+spawn pose** (offset = −mid/half) — without it, zero action meant the joint-limit midpoints
+and every episode opened with a stand-up kick from the prone crouch. The policy can
+therefore command essentially every joint's full range of motion instead of the old fixed
+±0.5 rad window around the default pose (which covered only 16–45% of each joint's range).
 EMA-smoothed (`alpha=0.3`, state re-initialized to the current joint positions on reset,
 so episodes don't start with a jump); raw magnitude clipped to ±1.
 
@@ -123,6 +140,7 @@ bounding area, or the time limit.
 | `base_nan` | any NaN/Inf in root or joint state | failure |
 | `base_too_high` | base origin z > **0.45 m** (physics-exploit guard) | failure |
 | `out_of_bounds` | \|dx\| > **2.5 m** or \|dy\| > **1.5 m** from the env origin | failure |
+| `stalled` | < **0.05 m** progress along the reference (jaw) axis within **12 s** | failure |
 
 **Why this matters for learning.** Because tipping is not a failure and the bounds are
 large, most episodes run the full 20 s and `alive` is earned almost every step. That yields
@@ -135,10 +153,12 @@ contributor to slow learning.
 
 Enabled by default (`use_curriculum=True`). Two knobs advance as the population improves:
 
-- **`v_target`:** 0.06 → 0.10 m/s, +0.005 step. Advances only when mean forward speed >
-  60% of the current target **and** mean episode length > 50% of max.
-- **`friction_scale`:** 1.5 → 1.0, −0.05 step. Decays the extra ground-friction multiplier
-  as the robot gets faster. (Per-env base friction is sampled at startup, effective
+- **`v_target`:** 0.06 → 0.10 m/s, +0.005 step. Advances only when the population mean of
+  a 2 s EMA of reference-projected speed > 60% of the current target **and** mean episode
+  length > 50% of max (an instantaneous snapshot is inflated by flailing and advanced the
+  difficulty on bogus evidence).
+- **`friction_scale`:** 1.5 → 1.0, −0.05 step. Same EMA gate; decays the extra
+  ground-friction multiplier as the robot gets faster. (Per-env base friction is sampled at startup, effective
   ~0.5–1.2, and is also exposed to the critic as a privileged observation.)
 
 ---
@@ -173,19 +193,20 @@ cd /home/yousof/robotics/experimental/zombie_crawl
 ### 1. Smoke test, headless, with video
 
 Short run (64 envs) that verifies the full pipeline and writes at least one complete
-training clip. A clip is 2000 env steps long (40 s = two full episodes) and the first one
-starts at iteration 100 (100 + 2000/24 ≈ 184), so use `--max_iterations 200` or no clip
-will finish.
+training clip. A clip is 2000 env steps long (40 s = two full episodes); recording is
+suppressed until iteration 100, so the first clip runs ~iterations 101-185 — use
+`--max_iterations 190` or no clip will finish.
 
 ```bash
 python scripts/train.py --task Zombie-Crawl-SO100-v0 \
-    --num_envs 64 --max_iterations 200 --video --headless
+    --num_envs 64 --max_iterations 190 --video --headless
 # → logs/rsl_rl/zombie_crawl/<timestamp>/videos/train/train_overview_0000.mp4 (4K)
 ```
 
 ### 2. Full training, headless, with video
 
-The real run. One ~40 s 3840×2160 overview clip every 100 PPO iterations (all clips kept
+The real run. One ~40 s 3840×2160 overview clip every 200 PPO iterations, starting at
+iteration 100 (the warm-up phase is not recorded; all clips kept
 on disk, `keep_last_n_clips=None`). Clips capture every 8th env step (`frame_stride=8` →
 250 frames, 6 fps playback, ~8 GB peak host RAM): the recorder holds raw 4K frames in RAM
 until the clip closes, so a full-rate 2000-step clip (~66 GB) would OOM the machine.

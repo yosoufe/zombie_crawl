@@ -7,7 +7,7 @@
 
 Runs the policy in N parallel deterministic environments (default 100) for full 20 s
 episodes and reports:
-    - mean / median / std forward displacement along +X [m]
+    - mean / median / std forward displacement along the spawn reference axis (jaw dir) [m]
     - mean forward speed [m/s] and fraction of time within +/-50 % of v_target
     - mean absolute yaw drift [deg]
     - fraction of episodes terminated early
@@ -125,19 +125,26 @@ def main() -> None:
         # per-episode accumulators
         # Isaac Lab 3.0 gym wrapper: reset() is required before step()
         env.reset()
-        start_x = robot.data.root_pos_w.torch[:, 0].clone()
+        # reward reference direction: JAW axis at spawn (events.reset_start_pose stores
+        # spawn_yaw - pi/2; eval forces yaw 0, so this is constant world -Y). All forward
+        # metrics below are projections onto it, not raw world +X. Read AFTER reset(), which
+        # is where the event term first populates zombie_ref_yaw.
+        ref_yaw = getattr(env.unwrapped, "zombie_ref_yaw", None)
+        if ref_yaw is None or ref_yaw.shape[0] != num_envs:
+            ref_yaw = torch.zeros(num_envs, device=device)
+        cos_ref, sin_ref = torch.cos(ref_yaw), torch.sin(ref_yaw)
+        start_xy = robot.data.root_pos_w.torch[:, :2].clone()
         episode_peak_z = torch.zeros(num_envs, device=device)
         early_terminations = torch.zeros(num_envs, dtype=torch.int64, device=device)
         within_band = torch.zeros(total_steps, dtype=torch.float64)
         yaw_abs_sum = torch.zeros(total_steps, dtype=torch.float64)
 
         obs = env.get_observations()
-        last_x = start_x.clone()
         with torch.inference_mode():
             for step in range(total_steps):
-                # capture pre-step x: on the truncating final step the env resets the
+                # capture pre-step position: on the truncating final step the env resets the
                 # robot DURING env.step(), so the post-step root state is the spawn pose
-                last_x = robot.data.root_pos_w.torch[:, 0].clone()
+                last_xy = robot.data.root_pos_w.torch[:, :2].clone()
                 actions = policy(obs)
                 obs, _, dones, _ = env.step(actions)
                 # the MLP actor has no recurrent state to reset; guard for recurrent policies
@@ -146,7 +153,7 @@ def main() -> None:
                 state = robot.data.root_state_w.torch
                 # Isaac Lab 3.0 root_state_w layout: pos(3), quat(4), lin_vel(3), ang_vel(3)
                 z = state[:, 2]
-                vx = state[:, 7]
+                vx = state[:, 7] * cos_ref + state[:, 8] * sin_ref  # along the reference (jaw) axis
                 quat = state[:, 3:7]
                 _, _, yaw = euler_xyz_from_quat(quat)
                 episode_peak_z = torch.maximum(episode_peak_z, z)
@@ -160,10 +167,11 @@ def main() -> None:
                     for eid in ended.tolist():
                         if step + 1 < steps_per_episode:
                             early_terminations[eid] += 1
-                    start_x[ended] = robot.data.root_pos_w.torch[ended, 0]
+                        start_xy[ended] = robot.data.root_pos_w.torch[ended, :2]
 
-        final_x = last_x
-        displacement = final_x - start_x
+        displacement = (last_xy[:, 0] - start_xy[:, 0]) * cos_ref + (
+            last_xy[:, 1] - start_xy[:, 1]
+        ) * sin_ref  # projected on the reference (jaw) axis
         # envs that ended early: displacement from the (re)start; keep as-is (documented)
         displacements = displacement.cpu().numpy()
         displacements[early_terminations.cpu().numpy() > 0] = np.nan  # exclude interrupted episodes from displacement stats

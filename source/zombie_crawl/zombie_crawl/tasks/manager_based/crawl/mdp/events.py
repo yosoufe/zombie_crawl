@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import math
+
 import torch
 import warp as wp
 
@@ -51,8 +53,9 @@ def reset_start_pose(
     """Reset the robot into one of the named start poses, sampled per environment.
 
     Each pose entry maps a name to ``{"pos": (x, y, z), "rot": (roll, pitch, yaw), "joint_pos": {name: rad}}``.
-    On top of the named pose the function adds: a uniform yaw in ``yaw_range`` (the robot
-    must find +X itself), a small x/y offset, uniform joint noise, and zero velocity.
+    On top of the named pose the function adds: a uniform yaw in ``yaw_range``, a small x/y
+    offset, uniform joint noise, and zero velocity. The final spawn yaw is stored on
+    ``env.zombie_ref_yaw`` — rewards and curriculum score progress along this frozen direction.
     """
     asset: Articulation = env.scene[asset_cfg.name]
     device = asset.device
@@ -80,6 +83,15 @@ def reset_start_pose(
     # note: Isaac Lab 3.0 sample_uniform signature is (lower, upper, size, device)
     yaw = math_utils.sample_uniform(yaw_range[0], yaw_range[1], n, device=device)
     orientations_rpy[:, 2] += yaw
+    # record the final spawn yaw per env: rewards/curriculum score progress along this
+    # fixed direction (the robot has no heading observation, and spawns are uniform).
+    # The reference axis is the JAW axis = base-frame -Y (URDF shoulder at y=-0.045; zero-pose
+    # FK puts the jaw tip at y=-0.15), so store spawn_yaw - pi/2: (cos, sin) of the stored
+    # value then points where the zombie's face points, and it crawls head-first.
+    jaw_axis = orientations_rpy[:, 2] - 0.5 * math.pi
+    if not hasattr(env, "zombie_ref_yaw") or env.zombie_ref_yaw.shape[0] != env.num_envs:
+        env.zombie_ref_yaw = torch.zeros(env.num_envs, device=device)
+    env.zombie_ref_yaw[env_ids] = torch.atan2(torch.sin(jaw_axis), torch.cos(jaw_axis))
     positions[:, 0] += math_utils.sample_uniform(-xy_offset, xy_offset, n, device=device)
     positions[:, 1] += math_utils.sample_uniform(-xy_offset, xy_offset, n, device=device)
     if joint_noise > 0:
@@ -95,6 +107,16 @@ def reset_start_pose(
     # positions are relative to the environment origin
     # (env_origins is a CPU tensor on the no-terrain path; move it to the sim device)
     positions = positions + env.scene.env_origins[env_ids].to(device)
+    # the directional progress rewards cache position along the reference axis; when the
+    # ref re-rolls at reset, reseed those caches with the CURRENT projected position --
+    # a magnitude-based jump guard alone misses small re-rolls near the world origin
+    cos_j, sin_j = torch.cos(jaw_axis), torch.sin(jaw_axis)
+    p0 = positions[:, 0] * cos_j + positions[:, 1] * sin_j
+    for buf_name, val in (("zombie_lp_dx", 0.0), ("zombie_lp_dt", 0.0),
+                          ("zombie_lp_x0", p0), ("zombie_prev_x", p0)):
+        buf = getattr(env, buf_name, None)
+        if buf is not None and buf.shape[0] == env.num_envs:
+            buf[env_ids] = val
     # Isaac Lab 3.0: write_*_to_sim_index APIs are keyword-only with renamed params
     asset.write_root_pose_to_sim_index(root_pose=torch.cat([positions, orientations], dim=-1), env_ids=env_ids)
 

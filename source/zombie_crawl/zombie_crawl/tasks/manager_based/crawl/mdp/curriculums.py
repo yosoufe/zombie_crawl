@@ -29,6 +29,27 @@ if TYPE_CHECKING:
 from .rewards import get_v_target
 
 
+def _proj_vel_ema(env: "ManagerBasedEnv", tau: float = 2.0) -> float:
+    """Population mean of an EMA (~``tau`` s) of the reference-projected base velocity.
+
+    Both curriculum gates used to read ONE instantaneous frame of velocity; a flailing
+    population's instantaneous mean spikes on every stand-up/topple kick and advanced the
+    difficulty on bogus evidence. A short EMA gates on sustained forward motion instead.
+    """
+    from .rewards import get_ref_dir
+
+    dt = float(env.step_dt)
+    v = env.scene["robot"].data.root_lin_vel_w.torch
+    cos_ref, sin_ref = get_ref_dir(env)
+    v_proj = v[:, 0] * cos_ref + v[:, 1] * sin_ref
+    ema = getattr(env, "zombie_v_ema", None)
+    if ema is None or ema.shape[0] != env.num_envs:
+        env.zombie_v_ema = v_proj.clone()
+        return float(env.zombie_v_ema.mean())
+    ema += (v_proj - ema) * min(1.0, dt / tau)
+    return float(env.zombie_v_ema.mean())
+
+
 def v_target_curriculum(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor,
@@ -49,7 +70,7 @@ def v_target_curriculum(
     if env.extras["zombie_curriculum_step"] % check_interval != 0:
         return float(v_target[0])
 
-    mean_vx = env.scene["robot"].data.root_lin_vel_w.torch[:, 0].mean().item()
+    mean_vx = _proj_vel_ema(env)  # sustained speed along the reference (jaw) axis
     mean_episode_len = env.episode_length_buf.float().mean().item()
     max_len = env.cfg.episode_length_s / env.cfg.decimation / env.cfg.sim.dt
     if mean_vx > min_fraction * v_target[0] and mean_episode_len > min_episode_fraction * max_len:
@@ -80,8 +101,9 @@ def friction_curriculum(
     if env.extras["zombie_friction_step"] % check_interval != 0:
         return float(scale)
 
-    mean_vx = env.scene["robot"].data.root_lin_vel_w.torch[:, 0].mean().item()
-    if mean_vx > min_fraction * get_v_target(env).mean():
+    mean_vx = _proj_vel_ema(env)  # sustained speed along the reference (jaw) axis
+    mean_episode_len = env.episode_length_buf.float().mean().item()
+    if mean_vx > min_fraction * get_v_target(env).mean() and mean_episode_len > 0.5 * env.max_episode_length:
         scale = torch.clamp(scale - step_size, min=scale_final)
         env.extras["friction_scale"] = scale
     return float(scale)

@@ -34,6 +34,22 @@ def _wrap_to_pi(x: torch.Tensor) -> torch.Tensor:
     return torch.atan2(torch.sin(x), torch.cos(x))
 
 
+def get_ref_dir(env: ManagerBasedEnv) -> tuple[torch.Tensor, torch.Tensor]:
+    """(cos, sin) of each env's fixed SPAWN heading, written by ``reset_start_pose``.
+
+    All directional rewards/curricula project world velocities onto this direction instead of
+    the world +X axis: spawns are uniformly yaw-randomized and the policy has no heading
+    observation, so the only "forward" it can chase is the direction it was pointing at reset
+    (frozen reference -- following the CURRENT heading would be farmable by spinning).
+    Falls back to world +X before the first reset.
+    """
+    yaw = getattr(env, "zombie_ref_yaw", None)
+    if yaw is None or yaw.shape[0] != env.num_envs:
+        ones = torch.ones(env.num_envs, device=env.device)
+        return ones, torch.zeros_like(ones)
+    return torch.cos(yaw), torch.sin(yaw)
+
+
 def get_v_target(env: ManagerBasedEnv) -> torch.Tensor:
     """Per-environment forward velocity target (lazily initialized on ``env.v_target``).
 
@@ -73,6 +89,9 @@ def forward_velocity_exp(
     nonzero reward and "sit still and wiggle" beat crawling.
     """
     vx = _base_lin_vel_w(env, asset_cfg)[:, 0]
+    vy = _base_lin_vel_w(env, asset_cfg)[:, 1]
+    cos_ref, sin_ref = get_ref_dir(env)
+    vx = vx * cos_ref + vy * sin_ref  # velocity along the fixed SPAWN heading (was: world +X)
     target = get_v_target(env)
     gate = torch.clamp((vx - min_vel_fraction * target) / (0.2 * target), min=0.0, max=1.0)
     return gate * torch.tanh(vx / target)
@@ -83,13 +102,15 @@ def forward_progress(
     clip: float = 0.05,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Per-step displacement along world +X (clipped to ±clip).
+    """Per-step displacement along the reference (jaw) axis (clipped to ±clip).
 
     Displacements larger than 3*clip are treated as episode-boundary jumps (the env was
     reset between the two measurements) and zeroed.
     """
     asset = env.scene[asset_cfg.name]
-    x = asset.data.root_pos_w.torch[:, 0]
+    pos = asset.data.root_pos_w.torch
+    cos_ref, sin_ref = get_ref_dir(env)
+    x = pos[:, 0] * cos_ref + pos[:, 1] * sin_ref  # position along the SPAWN heading
     if not hasattr(env, "zombie_prev_x") or env.zombie_prev_x.shape[0] != x.shape[0]:
         env.zombie_prev_x = x.clone()
         return torch.zeros(env.num_envs, device=env.device)
@@ -114,7 +135,9 @@ def forward_progress_lpf(
     """
     asset = env.scene[asset_cfg.name]
     dt = float(env.step_dt)
-    x = asset.data.root_pos_w.torch[:, 0]
+    pos = asset.data.root_pos_w.torch
+    cos_ref, sin_ref = get_ref_dir(env)
+    x = pos[:, 0] * cos_ref + pos[:, 1] * sin_ref  # position along the SPAWN heading
     if not hasattr(env, "zombie_lp_dx") or env.zombie_lp_dx.shape[0] != x.shape[0]:
         env.zombie_lp_dx = torch.zeros_like(x)
         env.zombie_lp_dt = torch.zeros_like(x)
@@ -134,18 +157,26 @@ def yaw_error(
     env: ManagerBasedEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """1 - cos(yaw) of the base heading relative to world +X (0 = aligned, 2 = reversed)."""
+    """1 - cos(yaw) of the base heading relative to the SPAWN heading (0 = straight, 2 = reversed)."""
     quat_w = env.scene[asset_cfg.name].data.root_quat_w.torch  # Isaac Lab 3.0: x, y, z, w
     _, _, yaw = math_utils.euler_xyz_from_quat(quat_w)
-    return 1.0 - torch.cos(_wrap_to_pi(yaw))
+    ref = getattr(env, "zombie_ref_yaw", None)
+    if ref is None or ref.shape[0] != yaw.shape[0]:
+        ref = torch.zeros_like(yaw)
+    # compare JAW headings: current jaw axis is base yaw - pi/2 (body -Y), ref is stored
+    # as spawn_yaw - pi/2 -- without the offset here the term sits at 1.0 even when the
+    # robot tracks the reference perfectly, and pulls the body 90 deg off the travel axis
+    return 1.0 - torch.cos(_wrap_to_pi(yaw - 0.5 * math.pi - ref))
 
 
 def lateral_velocity(
     env: ManagerBasedEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Squared world-frame lateral (Y) base velocity."""
-    vy = _base_lin_vel_w(env, asset_cfg)[:, 1]
+    """Squared base velocity perpendicular to the SPAWN heading (was: world Y)."""
+    v = _base_lin_vel_w(env, asset_cfg)
+    cos_ref, sin_ref = get_ref_dir(env)
+    vy = -v[:, 0] * sin_ref + v[:, 1] * cos_ref
     return vy**2
 
 
@@ -155,8 +186,10 @@ def overspeed_penalty(
     command_name: str | None = None,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Quadratic penalty for world-frame +X velocity above ``factor * v_target``."""
-    vx = _base_lin_vel_w(env, asset_cfg)[:, 0]
+    """Quadratic penalty for velocity along the SPAWN heading above ``factor * v_target``."""
+    v = _base_lin_vel_w(env, asset_cfg)
+    cos_ref, sin_ref = get_ref_dir(env)
+    vx = v[:, 0] * cos_ref + v[:, 1] * sin_ref
     excess = torch.relu(vx - factor * get_v_target(env))
     return excess**2
 
