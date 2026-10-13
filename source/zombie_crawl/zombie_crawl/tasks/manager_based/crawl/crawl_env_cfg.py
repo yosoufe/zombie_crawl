@@ -79,6 +79,34 @@ START_POSES: dict[str, dict] = {
             "gripper": 0.0,
         },
     },
+    # fallen starts for RECOVERY training: a low, wide-based robot is push-immune (interval pushes
+    # at roll/pitch +/-2 rad/s never tipped it -- recovery reward stayed flat ~0.8), so instead we
+    # START a fraction of episodes already toppled and let the upright_bonus reward teach it to get
+    # back up. z is set a little above the resting side height so PhysX settles it down naturally.
+    "on_side": {
+        "pos": (0.0, 0.0, 0.04),
+        "rot": (1.5708, 0.0, 0.0),
+        "joint_pos": {
+            "shoulder_pan": 0.0,
+            "shoulder_lift": 0.0,
+            "elbow_flex": 0.0,
+            "wrist_flex": 0.0,
+            "wrist_roll": 0.0,
+            "gripper": 0.0,
+        },
+    },
+    "face_down": {
+        "pos": (0.0, 0.0, 0.04),
+        "rot": (0.0, 1.5708, 0.0),
+        "joint_pos": {
+            "shoulder_pan": 0.0,
+            "shoulder_lift": 0.0,
+            "elbow_flex": 0.0,
+            "wrist_flex": 0.0,
+            "wrist_roll": 0.0,
+            "gripper": 0.0,
+        },
+    },
 }
 
 
@@ -287,8 +315,9 @@ class CrawlEventsCfg:
         mode="reset",
         params={
             "poses": START_POSES,
-            # spawn from "folded" only (more poses may be added later)
-            "pose_weights": (1.0,),
+            # ~50% of episodes start toppled (on_side + face_down) so the upright_bonus reward
+            # exercises recovery; the other 50% start folded so the forward crawl gait is preserved.
+            "pose_weights": (0.5, 0.25, 0.25),
             "joint_noise": 0.1,
             "xy_offset": 0.05,
             # +-pi/2 instead of +-pi: a 180-degree turn-off is too costly early in training
@@ -642,7 +671,7 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
         # freeze the friction randomization at the default (multiplier 1.0)
         self.events.randomize_ground_friction.params["friction_range"] = (1.0, 1.0)
         # single, deterministic start pose
-        self.events.reset_start_pose.params["pose_weights"] = (1.0,)
+        self.events.reset_start_pose.params["pose_weights"] = (1.0, 0.0, 0.0)
         self.events.reset_start_pose.params["joint_noise"] = 0.0
         self.events.reset_start_pose.params["xy_offset"] = 0.0
         self.events.reset_start_pose.params["yaw_range"] = (0.0, 0.0)
@@ -675,7 +704,7 @@ class CrawlPlayEnvCfg(CrawlEnvCfg):
         # freeze the friction randomization at the default (multiplier 1.0)
         self.events.randomize_ground_friction.params["friction_range"] = (1.0, 1.0)
         # single, deterministic start pose
-        self.events.reset_start_pose.params["pose_weights"] = (1.0,)
+        self.events.reset_start_pose.params["pose_weights"] = (1.0, 0.0, 0.0)
         self.events.reset_start_pose.params["joint_noise"] = 0.0
         self.events.reset_start_pose.params["xy_offset"] = 0.0
         self.events.reset_start_pose.params["yaw_range"] = (0.0, 0.0)
