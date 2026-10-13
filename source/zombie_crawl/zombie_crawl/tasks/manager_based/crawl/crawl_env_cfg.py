@@ -312,13 +312,14 @@ class CrawlEventsCfg:
         interval_range_s=(4.0, 4.0),
         params={},
     )
-    # recovery rehearsal: periodically shove the base (linear + roll/pitch) so it is repeatedly
-    # knocked onto its side and must right itself; the upright_bonus gradient + forward income then
-    # teach recovery. Interval stays gentle (10-15 s) so the crawl itself is not drowned out.
+    # recovery rehearsal: shove the base (linear + roll/pitch) so it is repeatedly knocked onto its
+    # side and must right itself. Interval (3,6) s so a shove reliably lands DURING a crawl episode:
+    # at (10,15) s the robot crawled out of the box (out_of_bounds ~0.74) before any push fired, so
+    # recovery was never exercised (recovery reward stayed flat ~0.74, no dips to recover from).
     push_robot = EventTerm(
         func=mdp.push_by_setting_velocity,
         mode="interval",
-        interval_range_s=(10.0, 15.0),
+        interval_range_s=(3.0, 6.0),
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names="base"),
             "velocity_range": {

@@ -58,7 +58,8 @@ not the claw/wrist. The only term that touches the wrist is `wrist_pointing`.
 
 ## Other live config (not rewards/terminations)
 - Command direction: random +/-180 deg each reset, independent of spawn facing.
-- Push disturbance (`push_robot`, interval 10-15 s): linear x/y +/-0.4 m/s + roll/pitch +/-2 rad/s,
-  to knock the robot over so it rehearses recovery (enabled for the recovery phase; was off/zero).
+- Push disturbance (`push_robot`, interval 3-6 s): linear x/y +/-0.4 m/s + roll/pitch +/-2 rad/s,
+  to knock the robot over so it rehearses recovery (interval tightened from 10-15 s so shoves land
+  before the robot exits the box; was off/zero originally).
 - Curriculum `speed_target`: 0.06 (start) -> 0.10, frozen.
 - Curriculum `friction_scale`: 1.5 (start) -> 1.0, frozen.
