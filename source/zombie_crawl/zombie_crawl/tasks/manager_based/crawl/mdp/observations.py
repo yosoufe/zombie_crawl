@@ -50,3 +50,36 @@ def gait_phase_clock(env: ManagerBasedEnv, frequency: float = 0.5) -> torch.Tens
         2.0 * math.pi
     )
     return torch.stack([torch.sin(env.zombie_phase), torch.cos(env.zombie_phase)], dim=1)
+
+
+def heading_error_wrist(
+    env: "ManagerBasedEnv",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=("wrist",)),
+) -> torch.Tensor:
+    """Heading error observation: (cos, sin) of the angle between where the robot POINTS
+    and the frozen reference axis.
+
+    The pointing direction is the world-frame horizontal projection of the arrow from the
+    base origin to the WRIST body -- i.e. down the arm toward the jaws -- which is the
+    direction the robot must crawl along. Compared against ``env.zombie_ref_yaw`` (the
+    jaw axis at spawn, see ``mdp.reset_start_pose``), this hands the actor the exact
+    heading error the ``yaw_error`` reward measures, so it can correct drift instead of
+    discovering it only through reward pain. Returns (num_envs, 2); cos/sin are
+    wrap-invariant, so no angle normalization is needed.
+    """
+    asset = env.scene[asset_cfg.name]
+    wrist_ids = getattr(env, "zombie_wrist_body_ids", None)
+    if wrist_ids is None:
+        ids, _names = asset.find_bodies(list(asset_cfg.body_names), as_proxy=True)
+        wrist_ids = ids.torch.reshape(-1)
+        if wrist_ids.numel() == 0:
+            raise ValueError(f"heading_error_wrist: no body matching {asset_cfg.body_names}")
+        env.zombie_wrist_body_ids = wrist_ids
+    wrist = asset.data.body_pos_w.torch[:, wrist_ids[0]]
+    base = asset.data.root_pos_w.torch
+    arrow_yaw = torch.atan2(wrist[:, 1] - base[:, 1], wrist[:, 0] - base[:, 0])
+    ref = getattr(env, "zombie_ref_yaw", None)
+    if ref is None or ref.shape[0] != base.shape[0]:
+        ref = torch.zeros(base.shape[0], device=base.device)
+    d = arrow_yaw - ref
+    return torch.stack([torch.cos(d), torch.sin(d)], dim=-1)

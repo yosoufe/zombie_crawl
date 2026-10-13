@@ -42,15 +42,16 @@ JOINT_NAMES: tuple[str, ...] = (
     "gripper",
 )
 
-#: Default (resting) joint positions in rad. The arm is partially folded so that it
-#: sits on the ground without self-intersection. Tuned with the settle test.
+#: Default joint positions in rad: the URDF zero position = the single folded spawn pose.
+#: Anchors joint_pos_rel observations, joint_deviation reward, and the soft-limit window,
+#: so spawn / observation-zero / action-zero all agree on one pose.
 DEFAULT_JOINT_POS: dict[str, float] = {
     "shoulder_pan": 0.0,
-    "shoulder_lift": 0.8,
-    "elbow_flex": -1.2,
-    "wrist_flex": 0.5,
+    "shoulder_lift": 0.0,
+    "elbow_flex": 0.0,
+    "wrist_flex": 0.0,
     "wrist_roll": 0.0,
-    "gripper": 0.3,
+    "gripper": 0.0,
 }
 
 

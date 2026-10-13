@@ -42,7 +42,9 @@ class CrawlPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         hidden_dims=[256, 128, 64],
         activation="elu",
         obs_normalization=True,
-        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(init_std=1.0),
+        # init_std 0.4 (was 1.0): on the +/-1-clipped action space std=1.0 saturated the clip and,
+        # in run 2026-10-09_11-04-48, later blew up 0.08 -> 0.49 at iter ~710 (reward cliff +9 -> -11).
+        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(init_std=0.4),
     )
     critic = RslRlMLPModelCfg(
         hidden_dims=[256, 128, 64],
@@ -62,10 +64,12 @@ class CrawlPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=1.0e-3,
-        # "constant" instead of "adaptive": the adaptive schedule (desired_kl=0.01) decayed
-        # the LR from 1e-3 to ~5e-5 over the run, which froze learning mid-task. A constant
-        # 1e-3 keeps the policy responsive once the motion-gated reward provides a real signal.
-        schedule="constant",
+        # "adaptive" (KL guard): rsl-rl 5.5.1 has NO KL early-stop break, so adaptive LR is the only
+        # feedback loop that contains an entropy/std blow-up. The old "frozen at ~5e-5" problem came
+        # from init_std=1.0 saturating the clip so KL read ~0 and LR decayed to nothing; with a sane
+        # init_std the KL signal is meaningful. The 11-04-48 collapse happened because
+        # schedule="constant" left the std explosion completely unprotected.
+        schedule="adaptive",
         gamma=0.99,
         lam=0.95,
         desired_kl=0.01,

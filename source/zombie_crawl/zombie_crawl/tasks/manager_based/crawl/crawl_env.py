@@ -26,6 +26,15 @@ being a single camera (no per-env tiling, no OOM at large num_envs).
 
 from isaaclab.envs import ManagerBasedRLEnv
 
+# Stream training/play video frames straight to ffmpeg instead of buffering gigabytes in RAM.
+# manager_based_env instantiates the module-global ``VideoRecorder``, so swapping the symbol
+# here (this module loads at gym.make time, after the app is up) makes every recorder use
+# the streaming subclass. See streaming_recorder.py for details.
+from . import streaming_recorder as _streaming_recorder
+import isaaclab.envs.manager_based_env as _mb_env
+
+_mb_env.VideoRecorder = _streaming_recorder.StreamingVideoRecorder
+
 
 class CrawlRLEnv(ManagerBasedRLEnv):
     """Crawl env that keeps the headless training-video viewer rendering fresh frames."""
@@ -38,3 +47,8 @@ class CrawlRLEnv(ManagerBasedRLEnv):
             # re-rendering each step (fresh, non-static video frames).
             self.sim.set_setting("/isaaclab/render/rtx_sensors", True)
             self.sim.set_setting("/physics/fabricUpdateTransformations", True)
+
+
+class CrawlPlayRLEnv(ManagerBasedRLEnv):
+    """Play/eval env: identical to the base env, but importing it here guarantees the
+    streaming-video patch is applied for the deterministic play/eval recorders too."""

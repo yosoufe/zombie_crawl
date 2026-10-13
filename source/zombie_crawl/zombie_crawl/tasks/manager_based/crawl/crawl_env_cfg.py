@@ -55,6 +55,7 @@ from isaaclab.utils.noise import UniformNoiseCfg as Unoise
 
 from zombie_crawl.assets import SoArm100Cfg
 from zombie_crawl.tasks.manager_based.crawl import mdp
+from zombie_crawl.tasks.manager_based.crawl.mdp.actions import OffsetEMAJointPositionToLimitsActionCfg
 from zombie_crawl.tasks.manager_based.crawl import video_flags
 
 
@@ -64,40 +65,18 @@ from zombie_crawl.tasks.manager_based.crawl import video_flags
 ##
 
 START_POSES: dict[str, dict] = {
+    # deep crouch on the jaws: URDF zero position (all joints 0, gripper closed);
+    # spawn z = measured contact-resting height so the robot touches the ground at reset
     "folded": {
-        "pos": (0.0, 0.0, 0.005),
+        "pos": (0.0, 0.0, 0.0037),
         "rot": (0.0, 0.0, 0.0),
         "joint_pos": {
             "shoulder_pan": 0.0,
-            "shoulder_lift": 1.2,
-            "elbow_flex": -1.6,
-            "wrist_flex": 0.3,
+            "shoulder_lift": 0.0,
+            "elbow_flex": 0.0,
+            "wrist_flex": 0.0,
             "wrist_roll": 0.0,
-            "gripper": 0.3,
-        },
-    },
-    "extended": {
-        "pos": (0.0, 0.0, 0.005),
-        "rot": (0.0, 0.0, 0.0),
-        "joint_pos": {
-            "shoulder_pan": 0.0,
-            "shoulder_lift": 0.35,
-            "elbow_flex": -0.35,
-            "wrist_flex": 0.2,
-            "wrist_roll": 0.0,
-            "gripper": 0.3,
-        },
-    },
-    "on_side": {
-        "pos": (0.0, 0.0, 0.048),
-        "rot": (math.pi / 2.0, 0.0, 0.0),
-        "joint_pos": {
-            "shoulder_pan": 0.0,
-            "shoulder_lift": 1.0,
-            "elbow_flex": -1.4,
-            "wrist_flex": 0.3,
-            "wrist_roll": 0.0,
-            "gripper": 0.3,
+            "gripper": 0.0,
         },
     },
 }
@@ -180,10 +159,22 @@ class CrawlActionsCfg:
     initialized to the current joint positions, so episodes do not start with a jump.
     """
 
-    joint_pos = mdp.EMAJointPositionToLimitsActionCfg(
+    joint_pos = OffsetEMAJointPositionToLimitsActionCfg(
         asset_name="robot",
         joint_names=[".*"],
         scale=1.0,
+        # zero action commands the folded spawn (URDF zero). The stock mapping sends
+        # a=0 to the joint-limit MIDPOINTS, so every episode used to open with a
+        # stand-up kick from the prone crouch (stand-up flailing poisoned the rewards,
+        # the curriculum gates, and the yaw/orientation penalties).
+        neutral={
+            "shoulder_pan": 0.0,
+            "shoulder_lift": 0.0,
+            "elbow_flex": 0.0,
+            "wrist_flex": 0.0,
+            "wrist_roll": 0.0,
+            "gripper": 0.0,
+        },
         rescale_to_limits=True,
         alpha=0.3,
     )
@@ -195,12 +186,17 @@ class CrawlObservationsCfg:
 
     @configclass
     class PolicyCfg(ObsGroup):
-        """Actor observations: 25-D (27-D with the optional gait clock)."""
+        """Actor observations: 27-D (29-D with the optional gait clock)."""
 
         projected_gravity = ObsTerm(func=mdp.projected_gravity, noise=Unoise(n_min=-0.05, n_max=0.05))
+        # (cos, sin) of the angle between the base->wrist pointing arrow and the frozen
+        # reference axis -- hands the actor the heading error the yaw_error reward uses.
+        # NOTE: requires the world-frame wrist position (external localization), so this
+        # term is NOT proprioception-only; drop it for a strict sim-to-real transfer.
+        heading_err = ObsTerm(func=mdp.heading_error_wrist)
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=Unoise(n_min=-0.2, n_max=0.2))
         joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
-        joint_vel = ObsTerm(func=mdp.joint_vel, noise=Unoise(n_min=-1.5, n_max=1.5))
+        joint_vel = ObsTerm(func=mdp.joint_vel, noise=Unoise(n_min=-0.5, n_max=0.5))
         actions = ObsTerm(func=mdp.last_action)
         # optional metronome (removed in __post_init__ unless use_gait_clock)
         gait_clock = ObsTerm(func=mdp.gait_phase_clock, params={"frequency": 0.5})
@@ -229,18 +225,20 @@ class CrawlObservationsCfg:
 class CrawlRewardsCfg:
     """Reward terms. Weights are starting points (see docs/training_report.md for tuning notes)."""
 
-    # main: steady forward motion (gated on actual motion: no reward below 30% of v_target)
+    # main: steady forward motion (gated on actual motion: no reward below 30% of v_target).
+    # phase 2: tanh velocity reward (unsaturated gradient at low speed) + 1 Hz low-passed
+    # displacement term at weight 1.0, replacing the saturated bell and the token 0.1 progress term.
     forward_velocity = RewTerm(
-        func=mdp.forward_velocity_exp, weight=1.5, params={"std": 0.05, "min_vel_fraction": 0.3}
+        func=mdp.forward_velocity_exp, weight=1.5, params={"min_vel_fraction": 0.3}
     )
-    forward_progress = RewTerm(func=mdp.forward_progress, weight=0.1, params={"clip": 0.05})
+    forward_progress = RewTerm(func=mdp.forward_progress_lpf, weight=1.0, params={"tau_s": 1.0})
     # keep heading along +X and stay on the line
     yaw_error = RewTerm(func=mdp.yaw_error, weight=-0.5)
     lateral_velocity = RewTerm(func=mdp.lateral_velocity, weight=-1.0)
     # anti-exploit terms
     overspeed = RewTerm(func=mdp.overspeed_penalty, weight=-2.0, params={"factor": 2.0})
     vertical_velocity = RewTerm(func=mdp.vertical_velocity_l2, weight=-2.0)
-    base_height = RewTerm(func=mdp.base_height_l2, weight=-1.0, params={"target_height": 0.06})
+    base_height = RewTerm(func=mdp.base_height_l2, weight=-1.0, params={"target_height": 0.005})
     orientation = RewTerm(func=mdp.flat_orientation_l2, weight=-0.5)
     # smooth, cheap, joint-friendly motion
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
@@ -249,7 +247,7 @@ class CrawlRewardsCfg:
     joint_torques = RewTerm(func=mdp.joint_torques_l2, weight=-1.0e-5)
     joint_deviation = RewTerm(func=mdp.joint_deviation_l2, weight=-1.0e-3)
     # survival
-    alive = RewTerm(func=mdp.is_alive, weight=0.1)
+    alive = RewTerm(func=mdp.is_alive, weight=0.05)  # phase 2: halved (flat value contrast problem)
     # optional zombie-style terms (disabled by default; enable by setting weight > 0)
     low_ground_contact = RewTerm(func=mdp.low_ground_contact_bonus, weight=0.0)
     gait_asymmetry = RewTerm(func=mdp.gait_asymmetry_bonus, weight=0.0)
@@ -280,14 +278,15 @@ class CrawlEventsCfg:
         mode="reset",
         params={
             "poses": START_POSES,
-            # "on_side" (index 2) starts the robot tipped over and made reorientation the
-            # dominant early task (yaw_error stayed ~-0.5 for the whole run); drop it and
-            # weight "folded" 2:1 over "extended"
-            "pose_weights": (2.0, 1.0, 0.0),
+            # spawn from "folded" only (more poses may be added later)
+            "pose_weights": (1.0,),
             "joint_noise": 0.1,
             "xy_offset": 0.05,
             # +-pi/2 instead of +-pi: a 180-degree turn-off is too costly early in training
-            "yaw_range": (-math.pi / 2, math.pi / 2),
+            # uniform facing: rewards/curriculum score motion along the frozen SPAWN heading
+            # (mdp.reset_start_pose records it), so the task is rotationally symmetric and
+            # needs no world-+X reference the policy cannot observe
+            "yaw_range": (-math.pi, math.pi),
         },
     )
     # once at startup: per-env ground friction multiplier (effective 0.5-1.2)
@@ -423,11 +422,14 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
     viewport render per captured frame regardless of ``num_envs`` — no per-env camera tiling,
     no OOM at 4096 envs.
     """
-    training_video_length: int = 500
-    """Clip length in env steps (500 = 10 s at 50 Hz)."""
-    training_video_interval_iters: int = 25
+    training_video_length: int = 2000
+    """Clip length in env steps (2000 = 40 s at 50 Hz = two full 20 s episodes)."""
+    training_video_start_iters: int = 100
+    """Begin recording at this PPO iteration (the warm-up phase gets no clip; the first
+    clip covers iterations 100-140)."""
+    training_video_interval_iters: int = 200
     """Start a new clip every N PPO iterations (converted to env steps with the runner's
-    ``num_steps_per_env`` = 24; 25 iters x 24 = 600 env steps)."""
+    ``num_steps_per_env`` = 24; 100 iters x 24 = 2400 env steps)."""
     training_video_cam_height: float = 4.5
     """Height of the world-space viewer camera above the grid centre [m]."""
     training_video_cam_distance: float = 7.0
@@ -595,9 +597,13 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
                 video_length=self.training_video_length,
                 video_interval=self.training_video_interval_iters * 24,
                 output_filename_prefix="train_overview",
-                fps=30,
-                step_offset=5,  # skip RTX warm-up frames at the start of each clip
-                keep_last_n_clips=10,
+                fps=None,  # auto: render_fps/frame_stride = 50 fps at full capture rate
+                # frames are streamed to ffmpeg via zombie_crawl's StreamingVideoRecorder (see
+                # streaming_recorder.py + the patch in the task __init__), so host RAM stays
+                # at ~one frame per clip. Full rate: frame_stride=1 -> smooth 40 s playback.
+                frame_stride=1,
+                step_offset=self.training_video_start_iters * 24 + 5,  # delay all clips past warm-up (see training_video_start_iters; +5 skips the first frames)
+                keep_last_n_clips=None,  # keep every clip on disk (was 10: the recorder deleted older clips mid-run)
             )
         ]
 
@@ -614,7 +620,7 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
         # freeze the friction randomization at the default (multiplier 1.0)
         self.events.randomize_ground_friction.params["friction_range"] = (1.0, 1.0)
         # single, deterministic start pose
-        self.events.reset_start_pose.params["pose_weights"] = (1.0, 0.0, 0.0)
+        self.events.reset_start_pose.params["pose_weights"] = (1.0,)
         self.events.reset_start_pose.params["joint_noise"] = 0.0
         self.events.reset_start_pose.params["xy_offset"] = 0.0
         self.events.reset_start_pose.params["yaw_range"] = (0.0, 0.0)
@@ -647,7 +653,7 @@ class CrawlPlayEnvCfg(CrawlEnvCfg):
         # freeze the friction randomization at the default (multiplier 1.0)
         self.events.randomize_ground_friction.params["friction_range"] = (1.0, 1.0)
         # single, deterministic start pose
-        self.events.reset_start_pose.params["pose_weights"] = (1.0, 0.0, 0.0)
+        self.events.reset_start_pose.params["pose_weights"] = (1.0,)
         self.events.reset_start_pose.params["joint_noise"] = 0.0
         self.events.reset_start_pose.params["xy_offset"] = 0.0
         self.events.reset_start_pose.params["yaw_range"] = (0.0, 0.0)
