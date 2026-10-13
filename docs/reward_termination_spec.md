@@ -33,8 +33,9 @@ command crawling.
 | `lateral_velocity` | -1.0 | base linear velocity component perpendicular to the **claw** axis, squared | base root body (world) | punishes crabbing |
 | `overspeed` | -2.0 | base speed along the **claw** axis beyond 2x target | base root body (world) | punishes bolting |
 | `vertical_velocity` | -2.0 | base linear-velocity Z component squared | base root body (world Z) | punishes base rising/falling (hop) |
-| `base_height` | -1.0 | `(base Z - 0.005 m)^2` | base root body (world Z) | target base Z = 0.005 m (approx. lying flat on floor); ~0 at rest |
+| `base_height` | -0.5 | `(base Z - 0.005 m)^2` | base root body (world Z) | target base Z = 0.005 m (approx. lying flat on floor); softened from -1.0 so lying collapsed is no longer rewarded |
 | `orientation` | -0.5 | `gx^2 + gy^2` of base projected gravity (tilt from flat) | base root body (body frame) | favors base lying flat |
+| `recovery` | +1.0 | `clamp(-base_gz, 0, 1)` of base projected gravity | base root body (body frame) | upright-recovery shaping: ~1 level, ~0 parked on the side; dense "get back up" signal |
 | `joint_limits` | 0.0 | joints pushed into soft limits | all actuated joints | **disabled** |
 | `action_rate` | -0.01 | change in consecutive actions | actions | mild smoothness |
 | `joint_deviation` | 0.0 | drift from nominal joint angles | all actuated joints | **disabled** |
@@ -57,5 +58,7 @@ not the claw/wrist. The only term that touches the wrist is `wrist_pointing`.
 
 ## Other live config (not rewards/terminations)
 - Command direction: random +/-180 deg each reset, independent of spawn facing.
+- Push disturbance (`push_robot`, interval 10-15 s): linear x/y +/-0.4 m/s + roll/pitch +/-2 rad/s,
+  to knock the robot over so it rehearses recovery (enabled for the recovery phase; was off/zero).
 - Curriculum `speed_target`: 0.06 (start) -> 0.10, frozen.
 - Curriculum `friction_scale`: 1.5 (start) -> 1.0, frozen.

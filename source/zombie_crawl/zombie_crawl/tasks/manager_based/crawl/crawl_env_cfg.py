@@ -241,8 +241,14 @@ class CrawlRewardsCfg:
     # anti-exploit terms
     overspeed = RewTerm(func=mdp.overspeed_penalty, weight=-2.0, params={"factor": 2.0})
     vertical_velocity = RewTerm(func=mdp.vertical_velocity_l2, weight=-2.0)
-    base_height = RewTerm(func=mdp.base_height_l2, weight=-1.0, params={"target_height": 0.005})
+    # base_height target stays low (matches the low claw-crouch) but softened -1.0 -> -0.5 so it no
+    # longer out-weighs recovering: lying collapsed is now the low-recovery state, not a reward.
+    base_height = RewTerm(func=mdp.base_height_l2, weight=-0.5, params={"target_height": 0.005})
     orientation = RewTerm(func=mdp.flat_orientation_l2, weight=-0.5)
+    # recovery: dense reward for being level (~1) vs parked on the side (~0). Lets a toppled robot
+    # discover getting back up; a level crawl crouch scores the same, so it can't be farmed by
+    # standing still (forward_velocity +2.5 stays dominant and `stalled` still punishes no-motion).
+    recovery = RewTerm(func=mdp.upright_bonus, weight=1.0)
     # smooth, cheap, joint-friendly motion
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
     joint_acc = RewTerm(func=mdp.joint_acc_l2, weight=-1.0e-4)
@@ -306,14 +312,21 @@ class CrawlEventsCfg:
         interval_range_s=(4.0, 4.0),
         params={},
     )
-    # off by default: push perturbations (future real-robot phase)
+    # recovery rehearsal: periodically shove the base (linear + roll/pitch) so it is repeatedly
+    # knocked onto its side and must right itself; the upright_bonus gradient + forward income then
+    # teach recovery. Interval stays gentle (10-15 s) so the crawl itself is not drowned out.
     push_robot = EventTerm(
         func=mdp.push_by_setting_velocity,
         mode="interval",
         interval_range_s=(10.0, 15.0),
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names="base"),
-            "velocity_range": {"x": (0.0, 0.0), "y": (0.0, 0.0)},
+            "velocity_range": {
+                "x": (-0.4, 0.4),
+                "y": (-0.4, 0.4),
+                "roll": (-2.0, 2.0),
+                "pitch": (-2.0, 2.0),
+            },
         },
     )
     # off by default: actuator gain randomization (experimental)

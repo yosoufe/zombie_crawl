@@ -84,6 +84,23 @@ def get_claw_dir(
     return torch.cos(claw_yaw), torch.sin(claw_yaw)
 
 
+def upright_bonus(
+    env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """Recovery shaping: ~1 when the base is level/upright, ~0 when tipped onto its side.
+
+    ``clamp(-projected_gravity_b[:, 2], 0, 1)``: +1 flat, 0 at ~90 deg (parked on the side), clipped
+    to 0 when inverted. This is a dense gradient that pays simply for RIGHTING the base, so a robot
+    knocked onto its side is rewarded for climbing back toward level instead of freezing there in the
+    folded crouch. It is the antidote to the old reward where lying down was ~free (``base_height``
+    targeted 5 mm above the floor, so a low/collapsed posture barely cost anything). It does NOT
+    reward standing tall -- a level crawling crouch scores the same ~1 as a level base -- so it is
+    compatible with the low claw-drag gait and cannot be farmed by rearing up and freezing.
+    """
+    grav = env.scene[asset_cfg.name].data.projected_gravity_b.torch
+    return torch.clamp(-grav[:, 2], min=0.0, max=1.0)
+
+
 def get_v_target(env: ManagerBasedEnv) -> torch.Tensor:
     """Per-environment forward velocity target (lazily initialized on ``env.v_target``).
 
