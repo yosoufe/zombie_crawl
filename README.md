@@ -35,10 +35,10 @@ each weighted. Positive terms maximize, negative terms penalize.
 
 | # | Term | Weight | Shape | Plain meaning |
 |---|------|-------:|-------|---------------|
-| 1 | `forward_velocity`  | **+1.5** | `tanh(v / v_target)`, motion-gated | The main term. Linear pull toward `v_target` along the spawn reference (jaw) axis, flattens once reached; overspeed still punished. |
+| 1 | `forward_velocity`  | **+1.5** | `tanh(v / v_target)`, gated up, **negative down** | The main term. Pull toward `v_target` along the reference (jaw) axis; flattens once reached; **backward crawling scores negative**, so forward/backward oscillation nets ~zero. |
 | 2 | `forward_progress`  | +1.0 | 1 Hz low-passed displacement along the reference (jaw) axis (τ = 1 s) | Immune to back-and-forth oscillation; shapes end-of-episode displacement directly. |
 | 3 | `alive`             | +0.05 | 1.0 each step the episode is alive | Keeps the running score positive. Phase 2: halved for value contrast. |
-| 4 | `yaw_error`         | −0.5 | `1 − cos(Δyaw)` vs reference (jaw) axis | Penalizes veering off the spawn direction; full penalty turning around. |
+| 4 | `yaw_error`         | −2.0 | `1 − cos(Δyaw)` vs reference (jaw) axis | Penalizes veering off the spawn direction; strong enough that crab-walking (body yawed while travelling along ref) never pays. |
 | 5 | `lateral_velocity`  | −1.0 | `vy²` perpendicular to the reference (jaw) axis | Penalizes swaying sideways. |
 | 6 | `vertical_velocity` | −2.0 | `vz²` | Anti-hop: penalizes moving up/down. |
 | 7 | `base_height`       | −1.0 | `(z − 0.005)²` | Anti-launch: penalizes rising off the crouch resting height (~0.5 cm). |
@@ -98,11 +98,12 @@ friction (asymmetric actor-critic).
 (`EMAJointPositionToLimitsAction`) — a raw action in [−1, +1] maps onto each joint's own
 **soft** position limits (−1 = low, +1 = high; with `soft_joint_pos_limit_factor = 0.95`
 that is the middle 95% of each joint's hard range, shrunk symmetrically about the default
-position, which is the folded spawn). A per-joint `offset` puts **zero action at the folded
-spawn pose** (offset = −mid/half) — without it, zero action meant the joint-limit midpoints
-and every episode opened with a stand-up kick from the prone crouch. The policy can
-therefore command essentially every joint's full range of motion instead of the old fixed
-±0.5 rad window around the default pose (which covered only 16–45% of each joint's range).
+position, which is the folded spawn). A custom subclass (`mdp/actions.py`) maps **zero action to the folded
+spawn pose** while `a=±1` still reach each joint's full soft limits (two-sided piecewise
+about the neutral). The stock map (zero = joint-range midpoint) opened every episode with a
+stand-up kick; an affine-offset variant halved the one-sided joints' reachable ranges, which
+forced the robot into a sideways crab-walk exploit. Policy covers each joint's full motion
+(the old fixed ±0.5 rad window covered only 16–45%).
 EMA-smoothed (`alpha=0.3`, state re-initialized to the current joint positions on reset,
 so episodes don't start with a jump); raw magnitude clipped to ±1.
 
@@ -207,9 +208,10 @@ python scripts/train.py --task Zombie-Crawl-SO100-v0 \
 
 The real run. One ~40 s 3840×2160 overview clip every 200 PPO iterations, starting at
 iteration 100 (the warm-up phase is not recorded; all clips kept
-on disk, `keep_last_n_clips=None`). Clips capture every 8th env step (`frame_stride=8` →
-250 frames, 6 fps playback, ~8 GB peak host RAM): the recorder holds raw 4K frames in RAM
-until the clip closes, so a full-rate 2000-step clip (~66 GB) would OOM the machine.
+on disk, `keep_last_n_clips=None`). Frames stream straight into ffmpeg at full rate
+(`frame_stride=1`, 50 fps playback) via the task's `StreamingVideoRecorder`
+(`streaming_recorder.py`), so host RAM stays constant — the stock in-RAM buffer would
+need ~66 GB for a clip this size.
 
 ```bash
 python scripts/train.py --task Zombie-Crawl-SO100-v0 \
@@ -226,7 +228,31 @@ Notes on `--video`:
   `CrawlEnvCfg`. Headless frames are fresh (not the old frozen-viewport bug) — see
   [docs/video_fix.md](docs/video_fix.md).
 
-### 3. GUI mode (watch it live)
+### 3. Resuming interrupted training
+
+Checkpoints are written every 50 iterations as `<run_dir>/model_<iter>.pt` under
+`logs/rsl_rl/zombie_crawl/`. Resume the **latest checkpoint of the latest run** with the
+launcher's checkpoint selector:
+
+```bash
+python scripts/train.py --task Zombie-Crawl-SO100-v0 \
+    --num_envs 4096 --max_iterations 3000 --video --headless --checkpoint latest
+```
+
+Pitfalls (all verified):
+
+- `--checkpoint latest` picks the *newest directory* in `logs/rsl_rl/zombie_crawl/`. An
+  aborted launch leaves an empty new dir that outranks the real one — delete stray dirs
+  (contents just `run.json`/`model_0.pt`) before resuming.
+- Resuming creates a NEW run dir that continues the iteration counter; the old dir stays
+  untouched.
+- Do NOT use `--load_run` (rejected: the 3.0 CLI is Hydra-based) and do NOT pass a run-dir
+  path to `--checkpoint` (path gets joined twice → `FileNotFoundError`). To continue from a
+  specific checkpoint instead of the newest, make it the newest `.pt` in the newest run
+  dir (e.g. move later ones aside).
+- `--max_iterations` is the TOTAL budget; resuming at 600 with 3000 keeps 2400 to go.
+
+### 4. GUI mode (watch it live)
 
 In 3.0 the launcher is headless by default; `--viz kit` opens the Kit window (and
 `--headless` forces headless, e.g. to override a visualizer that would otherwise open a

@@ -137,4 +137,6 @@ class SoArm100Cfg(ArticulationCfg):
     def __post_init__(self) -> None:
         # Build the actuator configuration from the selected preset.
         self.actuators = {"arm": make_actuator_cfg(self.actuator_preset)}
-        self.soft_joint_pos_limit_factor = 0.95
+        # 1.0: the folded spawn sits AT the hard stops of the one-sided joints; shrinking
+        # the window would push the spawn pose outside the commanded range entirely.
+        self.soft_joint_pos_limit_factor = 1.0

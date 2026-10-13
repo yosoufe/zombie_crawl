@@ -94,7 +94,10 @@ def forward_velocity_exp(
     vx = vx * cos_ref + vy * sin_ref  # velocity along the fixed SPAWN heading (was: world +X)
     target = get_v_target(env)
     gate = torch.clamp((vx - min_vel_fraction * target) / (0.2 * target), min=0.0, max=1.0)
-    return gate * torch.tanh(vx / target)
+    # backward is a PENALTY, not a free 0: the negative half of tanh is applied ungated,
+    # so a robot that oscillates forward/backward nets ~zero here too (previously the
+    # return stroke scored 0 and let oscillation farm ~50% of this term)
+    return torch.where(vx > 0, gate * torch.tanh(vx / target), torch.tanh(vx / target))
 
 
 def forward_progress(

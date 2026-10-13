@@ -148,11 +148,12 @@ class CrawlCommandsCfg:
 class CrawlActionsCfg:
     """6-D joint position targets via the limits-relative EMA mapping.
 
-    ``EMAJointPositionToLimitsAction`` maps a raw action in [-1, +1] onto each joint's own
-    (soft) position limits: -1 = low soft limit, +1 = high soft limit. With the asset's
-    ``soft_joint_pos_limit_factor = 0.95`` the reachable range is the middle 95% of each
-    joint's hard range (shrunk symmetrically about the range midpoint) -- the full measured
-    range of motion, minus a 5% safety margin that also matches the ``joint_limits`` reward.
+    ``OffsetEMAJointPositionToLimitsAction`` (mdp/actions.py) maps a raw action in [-1, +1]
+    piecewise about a NEUTRAL angle (zero action = folded spawn): a=0 -> neutral, a=+1 ->
+    the joint's high soft limit, a=-1 -> its low soft limit, both halves asymmetric. The
+    stock limits-relative map would center on the joint-range midpoint (a stand-up kick at
+    every reset) and an affine offset variant clipped away ~half of each one-sided joint's
+    range, disabling the claw-drag gait -- see mdp/actions.py docstring.
     This replaces the old fixed +/-0.5 rad
     window around the default pose, which covered only 16-45% of each joint's range.
     The EMA (alpha=0.3) smooths the commanded targets; on reset the EMA state is
@@ -233,7 +234,7 @@ class CrawlRewardsCfg:
     )
     forward_progress = RewTerm(func=mdp.forward_progress_lpf, weight=1.0, params={"tau_s": 1.0})
     # keep heading along +X and stay on the line
-    yaw_error = RewTerm(func=mdp.yaw_error, weight=-0.5)
+    yaw_error = RewTerm(func=mdp.yaw_error, weight=-2.0)
     lateral_velocity = RewTerm(func=mdp.lateral_velocity, weight=-1.0)
     # anti-exploit terms
     overspeed = RewTerm(func=mdp.overspeed_penalty, weight=-2.0, params={"factor": 2.0})
@@ -424,9 +425,9 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
     """
     training_video_length: int = 2000
     """Clip length in env steps (2000 = 40 s at 50 Hz = two full 20 s episodes)."""
-    training_video_start_iters: int = 100
+    training_video_start_iters: int = 500
     """Begin recording at this PPO iteration (the warm-up phase gets no clip; the first
-    clip covers iterations 100-140)."""
+    clip covers iterations 500-540)."""
     training_video_interval_iters: int = 200
     """Start a new clip every N PPO iterations (converted to env steps with the runner's
     ``num_steps_per_env`` = 24; 100 iters x 24 = 2400 env steps)."""
