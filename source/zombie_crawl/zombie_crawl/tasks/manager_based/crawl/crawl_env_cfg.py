@@ -226,15 +226,17 @@ class CrawlObservationsCfg:
 class CrawlRewardsCfg:
     """Reward terms. Weights are starting points (see docs/training_report.md for tuning notes)."""
 
-    # main: steady forward motion (gated on actual motion: no reward below 30% of v_target).
+    # main: steady forward motion (ungated tanh: linear reward from a dead stop, no minimum-speed
+    # cutoff -- a slow correct-direction creep already pays; backward pays negative).
     # phase 2: tanh velocity reward (unsaturated gradient at low speed) + 1 Hz low-passed
     # displacement term at weight 1.0, replacing the saturated bell and the token 0.1 progress term.
-    forward_velocity = RewTerm(
-        func=mdp.forward_velocity_exp, weight=1.5, params={"min_vel_fraction": 0.3}
-    )
+    forward_velocity = RewTerm(func=mdp.forward_velocity_exp, weight=1.5)
     forward_progress = RewTerm(func=mdp.forward_progress_lpf, weight=1.0, params={"tau_s": 1.0})
-    # point the claw at the commanded heading and stay on the line
-    wrist_pointing = RewTerm(func=mdp.wrist_pointing_error, weight=-2.0)
+    # point the claw at the commanded heading. Phase-3 (A): -2.0 -> -1.0. With the command now a
+    # random +-180 draw (commit e6f755e) a misaligned robot paid a near-constant -2/step, which
+    # exceeded the max forward income (~+1.5), so ~half the spawns started in a "nothing pays" trap
+    # and the policy gave up. -1.0 keeps alignment shaping but lets forward progress dominate.
+    wrist_pointing = RewTerm(func=mdp.wrist_pointing_error, weight=-1.0)
     lateral_velocity = RewTerm(func=mdp.lateral_velocity, weight=-1.0)
     # anti-exploit terms
     overspeed = RewTerm(func=mdp.overspeed_penalty, weight=-2.0, params={"factor": 2.0})
@@ -425,9 +427,9 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
     """
     training_video_length: int = 2000
     """Clip length in env steps (2000 = 40 s at 50 Hz = two full 20 s episodes)."""
-    training_video_start_iters: int = 500
+    training_video_start_iters: int = 200
     """Begin recording at this PPO iteration (the warm-up phase gets no clip; the first
-    clip covers iterations 500-540)."""
+    clip covers iterations 200-240). Override on the CLI with ``--video_start_iters N``."""
     training_video_interval_iters: int = 200
     """Start a new clip every N PPO iterations (converted to env steps with the runner's
     ``num_steps_per_env`` = 24; 100 iters x 24 = 2400 env steps)."""

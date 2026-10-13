@@ -71,33 +71,37 @@ def get_v_target(env: ManagerBasedEnv) -> torch.Tensor:
 def forward_velocity_exp(
     env: ManagerBasedEnv,
     std: float | None = None,
-    min_vel_fraction: float = 0.3,
     command_name: str | None = None,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Forward-velocity reward: ``tanh(vx / v_target)``, gated on actual forward motion.
+    """Forward-velocity reward: ``tanh(vx / v_target)``, no speed floor, but posture-gated.
 
-    Phase-2 change: the previous Gaussian bell (``std=0.05`` about ``v_target``) saturated near
-    ~2 cm/s actual speed (exp(-(0.05)^2/0.05^2) ~= 0.37 almost everywhere) and gave the policy
-    almost no gradient toward faster crawling -- the documented Phase-1 bottleneck. tanh(vx/t) is
-    LINEAR at low speed (gradient 1/t per unit velocity) and flattens once the target is reached,
-    so it rewards exactly the crawling speed the task wants without an upper clip. Overspeed beyond
-    2x target is still punished by the overspeed term, so tanh cannot be farmed.
+    tanh is linear at low speed (gradient 1/t per unit velocity) and flattens once the target is
+    reached, so it rewards exactly the crawling speed the task wants without an upper clip; a
+    stationary base scores exactly 0. Overspeed beyond 2x target is still punished by the
+    overspeed term, so it cannot be farmed.
 
-    Gated on actual forward motion: the reward ramps from 0 at ``min_vel_fraction * v_target``
-    to full weight at ``0.5 * v_target``. Without the gate, a stationary base still earned
-    nonzero reward and "sit still and wiggle" beat crawling.
+    Phase-3 change (A/B): removed the old ``min_vel_fraction`` speed gate -- that gate zeroed the
+    reward below ~1.8 cm/s so a small correct-direction creep was a net loss and, with a random
+    command, the policy settled into "do nothing". No speed floor is restored (linear from a dead
+    stop, as required). Instead a *posture* gate multiplies only the positive half: it is ~1 when
+    the base is upright and ->0 as the base tilts, so a forward topple (which is also forward
+    velocity) no longer pays. Without this the un-skilled way to earn this term was to fall
+    forward onto the face and slide, which is exactly the collapse the policy kept finding.
+    Backward motion stays a penalty regardless of posture, so oscillation still nets ~zero.
     """
     vx = _base_lin_vel_w(env, asset_cfg)[:, 0]
     vy = _base_lin_vel_w(env, asset_cfg)[:, 1]
     cos_ref, sin_ref = get_ref_dir(env)
     vx = vx * cos_ref + vy * sin_ref  # velocity along the commanded heading
     target = get_v_target(env)
-    gate = torch.clamp((vx - min_vel_fraction * target) / (0.2 * target), min=0.0, max=1.0)
-    # backward is a PENALTY, not a free 0: the negative half of tanh is applied ungated,
-    # so a robot that oscillates forward/backward nets ~zero here too (previously the
-    # return stroke scored 0 and let oscillation farm ~50% of this term)
-    return torch.where(vx > 0, gate * torch.tanh(vx / target), torch.tanh(vx / target))
+    # posture gate: squared horizontal tilt of projected gravity (0 = upright/flat, 1 = sideways).
+    # A crawling base stays near-flat so this is ~1; a face-plant drives it toward 0, killing the
+    # reward for the topple itself. Only the forward half is gated (backward is always a penalty).
+    grav = env.scene[asset_cfg.name].data.projected_gravity_b.torch
+    tilt = grav[:, 0] * grav[:, 0] + grav[:, 1] * grav[:, 1]
+    up = torch.clamp(1.0 - tilt, min=0.0, max=1.0)
+    return torch.where(vx > 0, up * torch.tanh(vx / target), torch.tanh(vx / target))
 
 
 def forward_progress(

@@ -6,8 +6,8 @@
 """Termination terms for the zombie crawl task.
 
 Note: the robot is *not* terminated for tipping over -- a crawler is allowed to flip
-itself. Only numerical failure, being flung into the air, or leaving the bounding
-area terminate the episode.
+itself and the gait is learned freely. Only numerical failure, being flung into the air,
+or leaving the bounding area terminate the episode.
 """
 
 from __future__ import annotations
