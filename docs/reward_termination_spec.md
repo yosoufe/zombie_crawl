@@ -8,11 +8,18 @@ them as relative influence.
 All base/vertical/height/orientation terms measure the **base link** (the robot's root
 body = the chassis that sits on the floor). Only `wrist_pointing` involves the wrist.
 
+The locomotion axis is now the **claw** (base->wrist arrow, via `get_claw_dir`), NOT the
+world command. Forward velocity, lateral and overspeed are all scored along the claw so
+the claw must lead and a backward slide scores negative. Net *progress toward the goal*
+(`forward_progress`), the `stalled` gate and the curriculum EMA stay on the world command
+(`get_ref_dir`), so earning forward-velocity and progress together forces claw-aligned-to-
+command crawling.
+
 ## Rewards (pay)
 
 | Term | Weight | Quantity measured | Body/frame | Current behavior |
 |---|---|---|---|---|
-| `forward_velocity` | +2.5 | `tanh(v_proj / speed_target)` where `v_proj` = base linear velocity projected onto the command axis, x `(1 - (gx^2+gy^2))` of base projected gravity | base root body (world) | +2.5 at target speed when base flat, ~0 when tipped, negative if moving backward |
+| `forward_velocity` | +2.5 | `tanh(v_claw / speed_target)` where `v_claw` = base linear velocity projected onto the **claw** (base->wrist) axis, x `(1 - (gx^2+gy^2))` of base projected gravity | base root body (world), claw axis | +2.5 at target speed when base flat, ~0 when tipped, negative if sliding opposite the claw |
 | `forward_progress` | +1.0 | 1 s EMA of base position displacement along the command axis | base root body (world) | net ground covered, not fakeable by jitter |
 | `alive` | +0.05 | 1 while episode runs | — | small survival bonus |
 | `low_ground_contact` | 0.0 | off | — | disabled |
@@ -22,9 +29,9 @@ body = the chassis that sits on the floor). Only `wrist_pointing` involves the w
 
 | Term | Weight | Quantity measured | Body/frame | Current behavior |
 |---|---|---|---|---|
-| `wrist_pointing` | -0.01 | `1 - cos(angle)` between the base->wrist arrow and the command | wrist body vs base (world XY) | near-off tie-breaker (was -1.0); kept only to break alignment ties, no longer a real attractor |
-| `lateral_velocity` | -1.0 | base linear velocity component perpendicular to the command, squared | base root body (world) | punishes crabbing |
-| `overspeed` | -2.0 | base horizontal speed beyond 2x target | base root body (world) | punishes bolting |
+| `wrist_pointing` | -0.5 | `1 - cos(angle)` between the base->wrist arrow and the command | wrist body vs base (world XY) | turning cue (was -1.0/-2.0); -1.0 at 180 deg. Forward is +2.5, so align-then-crawl beats point-and-sit |
+| `lateral_velocity` | -1.0 | base linear velocity component perpendicular to the **claw** axis, squared | base root body (world) | punishes crabbing |
+| `overspeed` | -2.0 | base speed along the **claw** axis beyond 2x target | base root body (world) | punishes bolting |
 | `vertical_velocity` | -2.0 | base linear-velocity Z component squared | base root body (world Z) | punishes base rising/falling (hop) |
 | `base_height` | -1.0 | `(base Z - 0.005 m)^2` | base root body (world Z) | target base Z = 0.005 m (approx. lying flat on floor); ~0 at rest |
 | `orientation` | -0.5 | `gx^2 + gy^2` of base projected gravity (tilt from flat) | base root body (body frame) | favors base lying flat |

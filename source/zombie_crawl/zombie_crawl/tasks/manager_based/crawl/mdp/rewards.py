@@ -50,6 +50,40 @@ def get_ref_dir(env: ManagerBasedEnv) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.cos(yaw), torch.sin(yaw)
 
 
+def get_claw_dir(
+    env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=("wrist",))
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """(cos, sin) of the base->wrist (claw) arrow heading -- the axis *forward velocity* is scored on.
+
+    This is the locomotion frame: the robot must drag its base toward wherever the claw points, so
+    the claw leads and a backward slide scores negative. It is the SAME horizontal base->wrist arrow
+    ``wrist_pointing_error`` (reward) and ``heading_error_wrist`` (observation) measure, so the actor
+    is steered by exactly what the reward pays. When the arm is curled the arrow degenerates, so it
+    falls back to the base's own forward axis (base -Y = ``yaw - pi/2``), which is always defined and
+    cannot be farmed by tucking the arm. Distinct from ``get_ref_dir`` (the world command), which is
+    kept only for net *progress* toward the goal and the stall/curriculum gates.
+    """
+    asset = env.scene[asset_cfg.name]
+    wrist_ids = getattr(env, "zombie_wrist_body_ids", None)
+    if wrist_ids is None:
+        ids, _names = asset.find_bodies(list(asset_cfg.body_names), as_proxy=True)
+        wrist_ids = ids.torch.reshape(-1)
+        if wrist_ids.numel() == 0:
+            raise ValueError(f"get_claw_dir: no body matching {asset_cfg.body_names}")
+        env.zombie_wrist_body_ids = wrist_ids
+    wrist = asset.data.body_pos_w.torch[:, wrist_ids[0]]
+    base = asset.data.root_pos_w.torch
+    dx = wrist[:, 0] - base[:, 0]
+    dy = wrist[:, 1] - base[:, 1]
+    arrow_yaw = torch.atan2(dy, dx)
+    quat_w = asset.data.root_quat_w.torch  # Isaac Lab 3.0: x, y, z, w
+    _, _, yaw = math_utils.euler_xyz_from_quat(quat_w)
+    fallback_yaw = yaw - 0.5 * math.pi
+    valid = torch.hypot(dx, dy) > 0.01
+    claw_yaw = torch.where(valid, arrow_yaw, fallback_yaw)
+    return torch.cos(claw_yaw), torch.sin(claw_yaw)
+
+
 def get_v_target(env: ManagerBasedEnv) -> torch.Tensor:
     """Per-environment forward velocity target (lazily initialized on ``env.v_target``).
 
@@ -74,26 +108,24 @@ def forward_velocity_exp(
     command_name: str | None = None,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Forward-velocity reward: ``tanh(vx / v_target)``, no speed floor, but posture-gated.
+    """Forward-velocity reward: ``tanh(v_claw / v_target)``, no speed floor, posture-gated.
 
-    tanh is linear at low speed (gradient 1/t per unit velocity) and flattens once the target is
-    reached, so it rewards exactly the crawling speed the task wants without an upper clip; a
-    stationary base scores exactly 0. Overspeed beyond 2x target is still punished by the
-    overspeed term, so it cannot be farmed.
+    ``v_claw`` is the base velocity projected onto the CLAW (base->wrist) axis via ``get_claw_dir``,
+    so the reward pays only for dragging the base toward wherever the claw points -- the claw must
+    lead, and a backward slide scores negative. (The old version projected onto the world command,
+    which let the robot earn full forward reward by crawling backward with the claw trailing.) tanh
+    is linear at low speed and flattens past the target, so a stationary base scores 0 and there is
+    no upper clip to farm; overspeed beyond 2x target is punished by the overspeed term.
 
-    Phase-3 change (A/B): removed the old ``min_vel_fraction`` speed gate -- that gate zeroed the
-    reward below ~1.8 cm/s so a small correct-direction creep was a net loss and, with a random
-    command, the policy settled into "do nothing". No speed floor is restored (linear from a dead
-    stop, as required). Instead a *posture* gate multiplies only the positive half: it is ~1 when
-    the base is upright and ->0 as the base tilts, so a forward topple (which is also forward
-    velocity) no longer pays. Without this the un-skilled way to earn this term was to fall
-    forward onto the face and slide, which is exactly the collapse the policy kept finding.
-    Backward motion stays a penalty regardless of posture, so oscillation still nets ~zero.
+    A *posture* gate multiplies only the positive half: ~1 when the base is upright and ->0 as it
+    tilts, so a face-plant topple no longer pays. Net progress toward the commanded *goal* is scored
+    separately by ``forward_progress_lpf`` (which stays on ``get_ref_dir``), so banking both terms at
+    once requires claw-aligned-to-command and crawling that way -- the intended zombie gait.
     """
     vx = _base_lin_vel_w(env, asset_cfg)[:, 0]
     vy = _base_lin_vel_w(env, asset_cfg)[:, 1]
-    cos_ref, sin_ref = get_ref_dir(env)
-    vx = vx * cos_ref + vy * sin_ref  # velocity along the commanded heading
+    cos_ref, sin_ref = get_claw_dir(env)
+    vx = vx * cos_ref + vy * sin_ref  # velocity along the claw (locomotion) axis
     target = get_v_target(env)
     # posture gate: squared horizontal tilt of projected gravity (0 = upright/flat, 1 = sideways).
     # A crawling base stays near-flat so this is ~1; a face-plant drives it toward 0, killing the
@@ -206,9 +238,9 @@ def lateral_velocity(
     env: ManagerBasedEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Squared base velocity perpendicular to the SPAWN heading (was: world Y)."""
+    """Squared base velocity perpendicular to the claw (locomotion) axis."""
     v = _base_lin_vel_w(env, asset_cfg)
-    cos_ref, sin_ref = get_ref_dir(env)
+    cos_ref, sin_ref = get_claw_dir(env)
     vy = -v[:, 0] * sin_ref + v[:, 1] * cos_ref
     return vy**2
 
@@ -219,9 +251,9 @@ def overspeed_penalty(
     command_name: str | None = None,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Quadratic penalty for velocity along the SPAWN heading above ``factor * v_target``."""
+    """Quadratic penalty for velocity along the claw (locomotion) axis above ``factor * v_target``."""
     v = _base_lin_vel_w(env, asset_cfg)
-    cos_ref, sin_ref = get_ref_dir(env)
+    cos_ref, sin_ref = get_claw_dir(env)
     vx = v[:, 0] * cos_ref + v[:, 1] * sin_ref
     excess = torch.relu(vx - factor * get_v_target(env))
     return excess**2

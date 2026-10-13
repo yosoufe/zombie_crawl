@@ -232,10 +232,11 @@ class CrawlRewardsCfg:
     # has a strong slope to follow. forward_progress (net displacement) remains the anti-park lever.
     forward_velocity = RewTerm(func=mdp.forward_velocity_exp, weight=2.5)
     forward_progress = RewTerm(func=mdp.forward_progress_lpf, weight=1.0, params={"tau_s": 1.0})
-    # point the claw at the commanded heading. Reduced to -0.01 (near-off): with the command a
-    # random +-180 draw this shaping was holding the policy on a "point the claw, then sit still"
-    # zero-gradient plateau, so it is kept only as a faint tie-breaker, not a real attractor.
-    wrist_pointing = RewTerm(func=mdp.wrist_pointing_error, weight=-0.01)
+    # point the claw at the commanded heading. Now that forward_velocity is scored on the CLAW axis,
+    # this term is a turning cue, not a trap: forward is +2.5 so aligning-then-crawling (+2.5) always
+    # beats pointing-and-sitting (0), which removes the earlier "point then freeze" plateau. -0.5 steers
+    # the claw toward the command so the claw-first crawl is aimed at the goal.
+    wrist_pointing = RewTerm(func=mdp.wrist_pointing_error, weight=-0.5)
     lateral_velocity = RewTerm(func=mdp.lateral_velocity, weight=-1.0)
     # anti-exploit terms
     overspeed = RewTerm(func=mdp.overspeed_penalty, weight=-2.0, params={"factor": 2.0})
