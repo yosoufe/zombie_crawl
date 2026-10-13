@@ -24,8 +24,9 @@ class CrawlPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """PPO runner configuration for the zombie crawl task."""
 
     # -- runner --------------------------------------------------------------------
-    num_steps_per_env = 24
-    """Steps per environment per rollout (24 x 0.02 s = 0.48 s of experience)."""
+    num_steps_per_env = 40
+    """Steps per environment per rollout (40 x 0.02 s = 0.8 s of experience; lengthened from 24
+    to give credit for the turn-then-crawl chain somewhere to propagate)."""
     max_iterations = 3000
     """Maximum training iterations (~1-3 h on a laptop GPU with 2048-4096 envs)."""
     save_interval = 50
@@ -44,7 +45,7 @@ class CrawlPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         obs_normalization=True,
         # init_std 0.4 (was 1.0): on the +/-1-clipped action space std=1.0 saturated the clip and,
         # in run 2026-10-09_11-04-48, later blew up 0.08 -> 0.49 at iter ~710 (reward cliff +9 -> -11).
-        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(init_std=0.4),
+        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(init_std=0.6),
     )
     critic = RslRlMLPModelCfg(
         hidden_dims=[256, 128, 64],
@@ -60,7 +61,11 @@ class CrawlPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         # lowered from 0.005: with the old value the action std grew to ~1.7 while the
         # adaptive LR schedule collapsed, so nearly every output saturated the clip and
         # exploration became uninformative noise. 0.001 lets std settle around a sane value.
-        entropy_coef=0.001,
+        # raised 0.001 -> 0.01 to push exploration off the "point-and-sit" zero-reward plateau.
+        # The old 0.001 was lowered during the init_std=1.0 blow-up era; with init_std now a sane
+        # 0.6 and adaptive-LR KL guard, a standard locomotion entropy bonus is safe and keeps the
+        # policy stochastic long enough to discover turning then crawling.
+        entropy_coef=0.01,
         num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=1.0e-3,
@@ -70,7 +75,7 @@ class CrawlPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         # init_std the KL signal is meaningful. The 11-04-48 collapse happened because
         # schedule="constant" left the std explosion completely unprotected.
         schedule="adaptive",
-        gamma=0.99,
+        gamma=0.995,
         lam=0.95,
         desired_kl=0.01,
         max_grad_norm=1.0,

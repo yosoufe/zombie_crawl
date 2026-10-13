@@ -227,16 +227,15 @@ class CrawlRewardsCfg:
     """Reward terms. Weights are starting points (see docs/training_report.md for tuning notes)."""
 
     # main: steady forward motion (ungated tanh: linear reward from a dead stop, no minimum-speed
-    # cutoff -- a slow correct-direction creep already pays; backward pays negative).
-    # phase 2: tanh velocity reward (unsaturated gradient at low speed) + 1 Hz low-passed
-    # displacement term at weight 1.0, replacing the saturated bell and the token 0.1 progress term.
-    forward_velocity = RewTerm(func=mdp.forward_velocity_exp, weight=1.5)
+    # cutoff -- a slow correct-direction creep already pays; backward pays negative). Weight raised
+    # 1.5 -> 2.5 so forward crawling clearly dominates every shaping/smoothing penalty and the policy
+    # has a strong slope to follow. forward_progress (net displacement) remains the anti-park lever.
+    forward_velocity = RewTerm(func=mdp.forward_velocity_exp, weight=2.5)
     forward_progress = RewTerm(func=mdp.forward_progress_lpf, weight=1.0, params={"tau_s": 1.0})
-    # point the claw at the commanded heading. Phase-3 (A): -2.0 -> -1.0. With the command now a
-    # random +-180 draw (commit e6f755e) a misaligned robot paid a near-constant -2/step, which
-    # exceeded the max forward income (~+1.5), so ~half the spawns started in a "nothing pays" trap
-    # and the policy gave up. -1.0 keeps alignment shaping but lets forward progress dominate.
-    wrist_pointing = RewTerm(func=mdp.wrist_pointing_error, weight=-1.0)
+    # point the claw at the commanded heading. Reduced to -0.01 (near-off): with the command a
+    # random +-180 draw this shaping was holding the policy on a "point the claw, then sit still"
+    # zero-gradient plateau, so it is kept only as a faint tie-breaker, not a real attractor.
+    wrist_pointing = RewTerm(func=mdp.wrist_pointing_error, weight=-0.01)
     lateral_velocity = RewTerm(func=mdp.lateral_velocity, weight=-1.0)
     # anti-exploit terms
     overspeed = RewTerm(func=mdp.overspeed_penalty, weight=-2.0, params={"factor": 2.0})
@@ -246,9 +245,9 @@ class CrawlRewardsCfg:
     # smooth, cheap, joint-friendly motion
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
     joint_acc = RewTerm(func=mdp.joint_acc_l2, weight=-1.0e-4)
-    joint_limits = RewTerm(func=mdp.joint_pos_limits, weight=-0.5)
+    joint_limits = RewTerm(func=mdp.joint_pos_limits, weight=0.0)
     joint_torques = RewTerm(func=mdp.joint_torques_l2, weight=-1.0e-5)
-    joint_deviation = RewTerm(func=mdp.joint_deviation_l2, weight=-1.0e-3)
+    joint_deviation = RewTerm(func=mdp.joint_deviation_l2, weight=0.0)
     # survival
     alive = RewTerm(func=mdp.is_alive, weight=0.05)  # phase 2: halved (flat value contrast problem)
     # optional zombie-style terms (disabled by default; enable by setting weight > 0)
