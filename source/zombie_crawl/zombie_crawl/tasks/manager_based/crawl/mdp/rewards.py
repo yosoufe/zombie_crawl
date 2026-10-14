@@ -125,29 +125,25 @@ def forward_velocity_exp(
     command_name: str | None = None,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Forward-velocity reward: ``tanh(v_claw * cos_align / v_target)``, no speed floor, posture-gated.
+    """Forward-velocity reward: ``tanh(v_goal / v_target)``, posture-gated. "Move toward the goal."
 
-    ``v_claw`` is the base velocity projected onto the CLAW (base->wrist) axis via ``get_claw_dir``
-    (the gait must be claw-first), and ``cos_align`` is the cosine between that claw arrow and the
-    COMMAND (``get_ref_dir``). Multiplying the two makes the dominant speed term DIRECTION-AWARE:
-    crawling fast while the claw points off the goal earns ~nothing (``cos_align``->0), and crawling
-    against the goal is penalised (``cos_align``<0). Only "drag the base toward the command, claw
-    leading" banks the full +weight. Previously the term was scored on the claw axis ALONE, so the
-    policy could bank the whole reward by crawling fast in whatever direction the claw happened to
-    point and never steered toward the command (the "off in some envs, never fixes" failure). The
-    claw is still the measured axis (so it can't be farmed by tucking the arm), and it uses the SAME
-    claw-vs-command angle as the ``heading_error_wrist`` observation, so the actor perceives exactly
-    what is rewarded. tanh is linear at low speed, flattens past the target; overspeed >2x is punished
-    by the overspeed term. A *posture* gate multiplies only the positive half so a face-plant topple
-    no longer pays. Net displacement toward the goal is also scored by ``forward_progress_lpf``.
+    ``v_goal`` is the base velocity projected onto the COMMANDED (goal) direction via
+    ``get_ref_dir``. This is the *locomotion* half of the goal: it pays only for advancing the base
+    toward where the command points, and scores negative for moving away. It is deliberately NOT
+    scored on the claw axis -- claw-axis speed let the robot bank the reward by crawling toward its
+    claw in whatever direction it happened to point (off-goal), and multiplying claw-speed by the
+    claw->command cosine let two negatives (claw pointed away *and* base moving opposite the claw)
+    multiply into a positive, so it learned to crawl tail-first (backward). Being an axis projection
+    onto a FIXED command direction, there is no sign that can flip into a fake positive.
+
+    "The claw must LEAD (claw-first, not tail-first)" is enforced by a SEPARATE additive reward,
+    ``wrist_pointing`` (claw->command aim). The two are independent numbers added together:
+    max total needs BOTH the base advancing toward the goal AND the claw aimed there.
     """
     vx = _base_lin_vel_w(env, asset_cfg)[:, 0]
     vy = _base_lin_vel_w(env, asset_cfg)[:, 1]
-    cos_c, sin_c = get_claw_dir(env)
-    cos_r, sin_r = get_ref_dir(env)
-    v_claw = vx * cos_c + vy * sin_c  # speed along the claw (gait) axis
-    cos_align = cos_c * cos_r + sin_c * sin_r  # claw-to-command alignment (1 = aimed at goal)
-    vx = v_claw * cos_align  # direction-aware: off-command crawl earns (near) nothing
+    cos_ref, sin_ref = get_ref_dir(env)
+    vx = vx * cos_ref + vy * sin_ref  # velocity toward the commanded goal direction
     target = get_v_target(env)
     # posture gate: squared horizontal tilt of projected gravity (0 = upright/flat, 1 = sideways).
     # A crawling base stays near-flat so this is ~1; a face-plant drives it toward 0, killing the

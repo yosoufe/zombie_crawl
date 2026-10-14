@@ -260,14 +260,15 @@ class CrawlRewardsCfg:
     # 1.5 -> 2.5 so forward crawling clearly dominates every shaping/smoothing penalty and the policy
     # has a strong slope to follow. forward_progress (net displacement) remains the anti-park lever.
     forward_velocity = RewTerm(func=mdp.forward_velocity_exp, weight=2.5)
-    # net displacement toward the GOAL (command axis), now normalized by v_target so it sits on the
-    # same scale as forward_velocity. The anti-park lever AND the second, slower goal signal.
+    # net displacement toward the GOAL (command axis), normalized by v_target. The anti-park lever.
     forward_progress = RewTerm(func=mdp.forward_progress_lpf, weight=1.0, params={"tau_s": 1.0})
-    # point the claw at the commanded heading. Now that forward_velocity is claw-speed x claw->command
-    # alignment (so off-command crawl earns ~nothing), this is the explicit turning cue. Raised
-    # -0.5 -> -1.0: it is the main gradient that rotates a robot spawned facing away from the command
-    # (~half the episodes draw a +-180 command), so the claw-first crawl actually aims at the goal.
-    wrist_pointing = RewTerm(func=mdp.wrist_pointing_error, weight=-1.0)
+    # Point the claw (base->wrist) at the commanded heading. This is now a STANDALONE additive reward
+    # (forward_velocity is scored on the goal axis, so this term, not a product, is what makes the
+    # claw LEAD). It is the anti-tail-first term: a robot that advances toward the goal while dragging
+    # the claw behind it has claw->command ~reversed, so this pays ~-2*weight and dominates the
+    # forward speed term -> walking backward is strictly dominated. Weight raised -1.0 -> -1.5 so the
+    # claw-first requirement clearly outweighs the goal-speed reward.
+    wrist_pointing = RewTerm(func=mdp.wrist_pointing_error, weight=-1.5)
     lateral_velocity = RewTerm(func=mdp.lateral_velocity, weight=-1.0)
     # anti-exploit terms
     overspeed = RewTerm(func=mdp.overspeed_penalty, weight=-2.0, params={"factor": 2.0})
