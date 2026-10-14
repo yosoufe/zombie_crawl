@@ -3,7 +3,13 @@
 A free-floating **SO-ARM100** (6-DOF arm, no fixed base) that is trained with **PPO**
 (RSL-RL) to drag its body forward along world **+X** on flat ground, crawling at
 ~6–10 cm/s. This file documents the three things that define the task: the **reward
-function**, the **neural-network models**, and the **termination conditions**.
+function**, the **neural-network models**, and the **termination conditions**. 
+
+![Zombie crawl training overview](docs/assets/zombie_crawl_training.gif)
+
+*Training overview clip: a grid of parallel SO-ARM100 policies crawling toward their own
+randomly commanded headings (single world-space viewer camera, one clip every 200 PPO
+iterations).*
 
 Source of truth (all under `source/zombie_crawl/zombie_crawl/tasks/manager_based/crawl/`):
 
