@@ -58,6 +58,9 @@ not the claw/wrist. The only term that touches the wrist is `wrist_pointing`.
 
 ## Other live config (not rewards/terminations)
 - Command direction: random +/-180 deg each reset, independent of spawn facing.
+- Fallen-start curriculum: training spawns `pose_weights` (0.5 folded, 0.25 on_side[roll+90],
+  0.25 face_down[pitch+90]) so half of episodes begin toppled and the `recovery` reward teaches
+  the robot to right itself. Play/eval is forced folded-only (1.0,0,0).
 - Push disturbance (`push_robot`, interval 3-6 s): linear x/y +/-0.4 m/s + roll/pitch +/-2 rad/s,
   to knock the robot over so it rehearses recovery (interval tightened from 10-15 s so shoves land
   before the robot exits the box; was off/zero originally).
