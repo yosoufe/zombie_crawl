@@ -119,7 +119,7 @@ def difficulty_curriculum(
     min_episode_fraction: float = 0.5,
     fallen_max: float = 0.5,
     push_max: float = 1.0,
-) -> float:
+) -> dict:
     """Ramp the recovery/robustness difficulty 0 -> 1, ONLY after the crawl is established.
 
     This is the single "difficulty" dial the recovery curriculum turns: it drives two env knobs
@@ -151,13 +151,22 @@ def difficulty_curriculum(
         )
     env.extras["zombie_difficulty_step"] += 1
 
+    # returned as a dict so the CurriculumManager logs each dial as its own TensorBoard card:
+    # Curriculum/difficulty/difficulty, /fallen_frac, /push_scale (manager wraps keys under the term name)
+    def _state() -> dict:
+        return {
+            "difficulty": float(env.extras["difficulty"]),
+            "fallen_frac": float(env.extras["fallen_frac"]),
+            "push_scale": float(env.extras["push_scale"]),
+        }
+
     if env.extras["zombie_difficulty_step"] % check_interval != 0:
-        return float(env.extras["difficulty"])
+        return _state()
 
     v_now = float(get_v_target(env).mean())
     # gate: only start turning up difficulty once the robot is genuinely crawling
     if v_now < start_after_v:
-        return float(env.extras["difficulty"])
+        return _state()
 
     mean_vx = _proj_vel_ema(env)
     mean_episode_len = env.episode_length_buf.float().mean().item()
@@ -167,4 +176,4 @@ def difficulty_curriculum(
         env.extras["difficulty"] = d
         env.extras["fallen_frac"] = fallen_max * d
         env.extras["push_scale"] = push_max * d
-    return float(env.extras["difficulty"])
+    return _state()
