@@ -342,9 +342,11 @@ class CrawlEventsCfg:
         params={},
     )
     # recovery rehearsal: shove the base (linear + roll/pitch) so it is repeatedly knocked onto its
-    # side and must right itself. Interval (3,6) s so a shove reliably lands DURING a crawl episode:
-    # at (10,15) s the robot crawled out of the box (out_of_bounds ~0.74) before any push fired, so
-    # recovery was never exercised (recovery reward stayed flat ~0.74, no dips to recover from).
+    # side and must right itself. Interval (3,6) s so a shove lands DURING a crawl episode. The
+    # magnitudes here are deliberately strong: the low, wide-based robot shrugged off the first
+    # attempt (linear +/-0.4 + roll/pitch +/-2 rad/s never tipped it -- recovery stayed flat), so
+    # these are raised to values that visibly rock/topple it (linear ~1.75x, angular ~2x) to build
+    # live-shove robustness on top of the fallen-start recovery.
     push_robot = EventTerm(
         func=mdp.push_by_setting_velocity,
         mode="interval",
@@ -352,10 +354,10 @@ class CrawlEventsCfg:
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names="base"),
             "velocity_range": {
-                "x": (-0.4, 0.4),
-                "y": (-0.4, 0.4),
-                "roll": (-2.0, 2.0),
-                "pitch": (-2.0, 2.0),
+                "x": (-0.7, 0.7),
+                "y": (-0.7, 0.7),
+                "roll": (-4.0, 4.0),
+                "pitch": (-4.0, 4.0),
             },
         },
     )
