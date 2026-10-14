@@ -61,8 +61,9 @@ not the claw/wrist. The only term that touches the wrist is `wrist_pointing`.
 - Fallen-start curriculum: training spawns `pose_weights` (0.5 folded, 0.25 on_side[roll+90],
   0.25 face_down[pitch+90]) so half of episodes begin toppled and the `recovery` reward teaches
   the robot to right itself. Play/eval is forced folded-only (1.0,0,0).
-- Push disturbance (`push_robot`, interval 3-6 s): linear x/y +/-0.7 m/s + roll/pitch +/-4 rad/s,
-  a strong live shove to knock the robot over during the crawl (first attempt at +/-0.4 & +/-2 was
-  shrugged off; magnitudes raised). Combined with the fallen-start curriculum for recovery.
+- Disturbance (`push_robot`): `apply_external_force_torque` on ALL rigid bodies (base + every arm
+  link), random force +/-0.4 N and torque +/-0.03 N*m per body per axis, re-rolled every 0.2-0.5 s.
+  Replaced the base-only velocity push (shrugged off by the low wide robot); per-body forces at each
+  link COM propagate through the joints, so every part is randomly poked.
 - Curriculum `speed_target`: 0.06 (start) -> 0.10, frozen.
 - Curriculum `friction_scale`: 1.5 (start) -> 1.0, frozen.

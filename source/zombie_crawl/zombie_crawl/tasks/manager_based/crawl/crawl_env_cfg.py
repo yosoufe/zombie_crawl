@@ -341,24 +341,20 @@ class CrawlEventsCfg:
         interval_range_s=(4.0, 4.0),
         params={},
     )
-    # recovery rehearsal: shove the base (linear + roll/pitch) so it is repeatedly knocked onto its
-    # side and must right itself. Interval (3,6) s so a shove lands DURING a crawl episode. The
-    # magnitudes here are deliberately strong: the low, wide-based robot shrugged off the first
-    # attempt (linear +/-0.4 + roll/pitch +/-2 rad/s never tipped it -- recovery stayed flat), so
-    # these are raised to values that visibly rock/topple it (linear ~1.75x, angular ~2x) to build
-    # live-shove robustness on top of the fallen-start recovery.
+    # disturbance on EVERY body part: a random 3D force + random torque applied to each rigid body
+    # (base AND every arm link), re-rolled every 0.2-0.5 s so the whole arm is randomly poked, not
+    # just shoved at the base. The earlier base-only velocity push was shrugged off (a shove at the
+    # low, wide CoM translates instead of tips); per-body forces at each link's COM propagate
+    # through the joints, so a random poke on the forearm destabilizes the robot like a real grab.
+    # asset_cfg with no body_names selects ALL bodies.
     push_robot = EventTerm(
-        func=mdp.push_by_setting_velocity,
+        func=mdp.apply_external_force_torque,
         mode="interval",
-        interval_range_s=(3.0, 6.0),
+        interval_range_s=(0.2, 0.5),
         params={
-            "asset_cfg": SceneEntityCfg("robot", body_names="base"),
-            "velocity_range": {
-                "x": (-0.7, 0.7),
-                "y": (-0.7, 0.7),
-                "roll": (-4.0, 4.0),
-                "pitch": (-4.0, 4.0),
-            },
+            "asset_cfg": SceneEntityCfg("robot"),  # all rigid bodies
+            "force_range": (-0.4, 0.4),  # N, sampled independently per body per axis
+            "torque_range": (-0.03, 0.03),  # N*m, sampled independently per body per axis
         },
     )
     # off by default: actuator gain randomization (experimental)
