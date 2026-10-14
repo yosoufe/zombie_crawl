@@ -260,12 +260,14 @@ class CrawlRewardsCfg:
     # 1.5 -> 2.5 so forward crawling clearly dominates every shaping/smoothing penalty and the policy
     # has a strong slope to follow. forward_progress (net displacement) remains the anti-park lever.
     forward_velocity = RewTerm(func=mdp.forward_velocity_exp, weight=2.5)
+    # net displacement toward the GOAL (command axis), now normalized by v_target so it sits on the
+    # same scale as forward_velocity. The anti-park lever AND the second, slower goal signal.
     forward_progress = RewTerm(func=mdp.forward_progress_lpf, weight=1.0, params={"tau_s": 1.0})
-    # point the claw at the commanded heading. Now that forward_velocity is scored on the CLAW axis,
-    # this term is a turning cue, not a trap: forward is +2.5 so aligning-then-crawling (+2.5) always
-    # beats pointing-and-sitting (0), which removes the earlier "point then freeze" plateau. -0.5 steers
-    # the claw toward the command so the claw-first crawl is aimed at the goal.
-    wrist_pointing = RewTerm(func=mdp.wrist_pointing_error, weight=-0.5)
+    # point the claw at the commanded heading. Now that forward_velocity is claw-speed x claw->command
+    # alignment (so off-command crawl earns ~nothing), this is the explicit turning cue. Raised
+    # -0.5 -> -1.0: it is the main gradient that rotates a robot spawned facing away from the command
+    # (~half the episodes draw a +-180 command), so the claw-first crawl actually aims at the goal.
+    wrist_pointing = RewTerm(func=mdp.wrist_pointing_error, weight=-1.0)
     lateral_velocity = RewTerm(func=mdp.lateral_velocity, weight=-1.0)
     # anti-exploit terms
     overspeed = RewTerm(func=mdp.overspeed_penalty, weight=-2.0, params={"factor": 2.0})

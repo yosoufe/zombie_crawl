@@ -125,24 +125,29 @@ def forward_velocity_exp(
     command_name: str | None = None,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Forward-velocity reward: ``tanh(v_claw / v_target)``, no speed floor, posture-gated.
+    """Forward-velocity reward: ``tanh(v_claw * cos_align / v_target)``, no speed floor, posture-gated.
 
-    ``v_claw`` is the base velocity projected onto the CLAW (base->wrist) axis via ``get_claw_dir``,
-    so the reward pays only for dragging the base toward wherever the claw points -- the claw must
-    lead, and a backward slide scores negative. (The old version projected onto the world command,
-    which let the robot earn full forward reward by crawling backward with the claw trailing.) tanh
-    is linear at low speed and flattens past the target, so a stationary base scores 0 and there is
-    no upper clip to farm; overspeed beyond 2x target is punished by the overspeed term.
-
-    A *posture* gate multiplies only the positive half: ~1 when the base is upright and ->0 as it
-    tilts, so a face-plant topple no longer pays. Net progress toward the commanded *goal* is scored
-    separately by ``forward_progress_lpf`` (which stays on ``get_ref_dir``), so banking both terms at
-    once requires claw-aligned-to-command and crawling that way -- the intended zombie gait.
+    ``v_claw`` is the base velocity projected onto the CLAW (base->wrist) axis via ``get_claw_dir``
+    (the gait must be claw-first), and ``cos_align`` is the cosine between that claw arrow and the
+    COMMAND (``get_ref_dir``). Multiplying the two makes the dominant speed term DIRECTION-AWARE:
+    crawling fast while the claw points off the goal earns ~nothing (``cos_align``->0), and crawling
+    against the goal is penalised (``cos_align``<0). Only "drag the base toward the command, claw
+    leading" banks the full +weight. Previously the term was scored on the claw axis ALONE, so the
+    policy could bank the whole reward by crawling fast in whatever direction the claw happened to
+    point and never steered toward the command (the "off in some envs, never fixes" failure). The
+    claw is still the measured axis (so it can't be farmed by tucking the arm), and it uses the SAME
+    claw-vs-command angle as the ``heading_error_wrist`` observation, so the actor perceives exactly
+    what is rewarded. tanh is linear at low speed, flattens past the target; overspeed >2x is punished
+    by the overspeed term. A *posture* gate multiplies only the positive half so a face-plant topple
+    no longer pays. Net displacement toward the goal is also scored by ``forward_progress_lpf``.
     """
     vx = _base_lin_vel_w(env, asset_cfg)[:, 0]
     vy = _base_lin_vel_w(env, asset_cfg)[:, 1]
-    cos_ref, sin_ref = get_claw_dir(env)
-    vx = vx * cos_ref + vy * sin_ref  # velocity along the claw (locomotion) axis
+    cos_c, sin_c = get_claw_dir(env)
+    cos_r, sin_r = get_ref_dir(env)
+    v_claw = vx * cos_c + vy * sin_c  # speed along the claw (gait) axis
+    cos_align = cos_c * cos_r + sin_c * sin_r  # claw-to-command alignment (1 = aimed at goal)
+    vx = v_claw * cos_align  # direction-aware: off-command crawl earns (near) nothing
     target = get_v_target(env)
     # posture gate: squared horizontal tilt of projected gravity (0 = upright/flat, 1 = sideways).
     # A crawling base stays near-flat so this is ~1; a face-plant drives it toward 0, killing the
@@ -181,6 +186,7 @@ def forward_progress(
 def forward_progress_lpf(
     env: ManagerBasedEnv,
     tau_s: float = 1.0,
+    normalize: bool = True,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
     """Exponentially filtered forward progress (displacement over a ``tau_s``-second window).
@@ -188,6 +194,12 @@ def forward_progress_lpf(
     Same unit as velocity: filtered dx / filtered dt. Unlike the instantaneous per-step dx,
     it cannot be inflated by jerky oscillation (reciprocal motion averages to zero over the
     window), so it directly shapes the end-of-episode displacement the task is evaluated on.
+
+    With ``normalize`` the filtered command-axis speed is divided by ``v_target`` so this term sits
+    on the SAME [0,1]-ish scale as the normalized ``forward_velocity`` term. Previously it returned
+    raw m/s (~v_target~0.06), so at weight 1.0 it contributed ~0.06 and was numerically negligible
+    next to the (then claw-axis, now direction-aware) +2.5 speed term -- the policy had no real
+    gradient toward the goal via this lever.
     """
     asset = env.scene[asset_cfg.name]
     dt = float(env.step_dt)
@@ -206,7 +218,10 @@ def forward_progress_lpf(
     decay = math.exp(-dt / tau_s)
     env.zombie_lp_dx = env.zombie_lp_dx * decay
     env.zombie_lp_dt = env.zombie_lp_dt * decay + dt
-    return env.zombie_lp_dx / env.zombie_lp_dt
+    out = env.zombie_lp_dx / env.zombie_lp_dt
+    if normalize:
+        out = out / torch.clamp(get_v_target(env), min=1e-3)
+    return out
 
 
 def wrist_pointing_error(
