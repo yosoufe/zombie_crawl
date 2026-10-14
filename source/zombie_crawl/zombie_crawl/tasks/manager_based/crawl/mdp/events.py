@@ -64,7 +64,19 @@ def reset_start_pose(
     n = len(env_ids)
 
     names = list(poses.keys())
-    weights = torch.tensor(pose_weights if pose_weights is not None else [1.0 / len(names)] * len(names), device=device)
+    # dynamic fallen-start fraction from the difficulty curriculum: with >=3 poses ordered
+    # (folded, on_side, face_down) and env.extras["fallen_frac"] set, override the baked
+    # pose_weights so the toppled fraction grows 0 -> fallen_max as difficulty ramps. Without the
+    # key (play/eval, or curriculum disabled) fall back to the static pose_weights.
+    f = env.extras.get("fallen_frac", None)
+    if f is not None and len(names) >= 3:
+        f = float(f)
+        weights_list = [1.0 - f, f / 2.0, f / 2.0]
+        weights = torch.tensor(weights_list, device=device)
+    else:
+        weights = torch.tensor(
+            pose_weights if pose_weights is not None else [1.0 / len(names)] * len(names), device=device
+        )
     weights = weights / weights.sum()
     pose_ids = torch.multinomial(weights, n, replacement=True)
 
@@ -231,3 +243,41 @@ def randomize_actuator_gains(
     if damping_range[1] > damping_range[0]:
         sample = math_utils.sample_uniform(damping_range[0], damping_range[1], (n, asset.num_joints), device=device)
         asset.data.joint_damping.torch[env_ids] = sample
+
+
+def disturb_all_bodies(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor | slice | None,
+    force_range: tuple[float, float] = (-0.4, 0.4),
+    torque_range: tuple[float, float] = (-0.03, 0.03),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    scale_key: str = "push_scale",
+) -> None:
+    """Random per-body force + torque disturbance, magnitude scaled by the difficulty curriculum.
+
+    Like ``mdp.apply_external_force_torque`` but multiplies the sampled force/torque ranges by
+    ``env.extras["scale_key"]`` (set 0 -> 1 by :func:`difficulty_curriculum`), so the robot is NOT
+    disturbed at all at the start of training and gets progressively poked on every link as it
+    learns to crawl. When the scale is 0 the wrench is explicitly cleared (so no residual force
+    lingers). Forces are applied at each body COM and propagate through the joints.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    if env_ids is None:
+        env_ids = slice(None)
+    scale = float(env.extras.get(scale_key, 1.0))
+    num_bodies = asset.num_bodies if isinstance(asset_cfg.body_ids, slice) else len(asset_cfg.body_ids)
+    num_envs = len(range(env.num_envs)[env_ids]) if isinstance(env_ids, slice) else len(env_ids)
+    size = (num_envs, num_bodies, 3)
+    if scale <= 0.0:
+        forces = torch.zeros(size, device=asset.device)
+        torques = torch.zeros(size, device=asset.device)
+    else:
+        forces = math_utils.sample_uniform(
+            force_range[0] * scale, force_range[1] * scale, size, asset.device
+        )
+        torques = math_utils.sample_uniform(
+            torque_range[0] * scale, torque_range[1] * scale, size, asset.device
+        )
+    asset.permanent_wrench_composer.set_forces_and_torques_index(
+        forces=forces, torques=torques, body_ids=asset_cfg.body_ids, env_ids=env_ids
+    )

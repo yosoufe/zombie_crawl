@@ -107,3 +107,64 @@ def friction_curriculum(
         scale = torch.clamp(scale - step_size, min=scale_final)
         env.extras["friction_scale"] = scale
     return float(scale)
+
+
+def difficulty_curriculum(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor,
+    start_after_v: float = 0.09,
+    step_size: float = 0.05,
+    check_interval: int = 100,
+    min_fraction: float = 0.6,
+    min_episode_fraction: float = 0.5,
+    fallen_max: float = 0.5,
+    push_max: float = 1.0,
+) -> float:
+    """Ramp the recovery/robustness difficulty 0 -> 1, ONLY after the crawl is established.
+
+    This is the single "difficulty" dial the recovery curriculum turns: it drives two env knobs
+    consumed elsewhere:
+
+    * ``env.extras["fallen_frac"]`` -- fraction of resets that start toppled (on_side/face_down),
+      read by :func:`reset_start_pose` to recompute its pose_weights.
+    * ``env.extras["push_scale"]`` -- multiplier on the external-force disturbance, read by
+      :func:`disturb_all_bodies`.
+
+    The whole point is STAGING that the from-scratch run showed was what the manual resume-chain was
+    doing by hand: the fragile forward gait must appear FIRST, so difficulty only advances once
+    ``v_target`` has essentially reached its final value (the robot is crawling well). Before that
+    the policy gets no fallen starts and no disturbance, exactly like the early phase of the
+    checkpoint chain. ``start_after_v`` is that gate.
+    """
+    if "difficulty" not in env.extras:
+        env.extras["difficulty"] = 0.0
+        env.extras["fallen_frac"] = 0.0
+        env.extras["push_scale"] = 0.0
+        env.extras["zombie_difficulty_step"] = 0
+        # one-shot sanity print: proves which zombie_crawl source tree this run imported
+        import zombie_crawl
+
+        print(
+            f"[CURRICULUM] difficulty term ACTIVE -- zombie_crawl imported from: "
+            f"{zombie_crawl.__file__}",
+            flush=True,
+        )
+    env.extras["zombie_difficulty_step"] += 1
+
+    if env.extras["zombie_difficulty_step"] % check_interval != 0:
+        return float(env.extras["difficulty"])
+
+    v_now = float(get_v_target(env).mean())
+    # gate: only start turning up difficulty once the robot is genuinely crawling
+    if v_now < start_after_v:
+        return float(env.extras["difficulty"])
+
+    mean_vx = _proj_vel_ema(env)
+    mean_episode_len = env.episode_length_buf.float().mean().item()
+    max_len = env.cfg.episode_length_s / env.cfg.decimation / env.cfg.sim.dt
+    if mean_vx > min_fraction * v_now and mean_episode_len > min_episode_fraction * max_len:
+        d = min(1.0, env.extras["difficulty"] + step_size)
+        env.extras["difficulty"] = d
+        env.extras["fallen_frac"] = fallen_max * d
+        env.extras["push_scale"] = push_max * d
+    return float(env.extras["difficulty"])

@@ -341,20 +341,20 @@ class CrawlEventsCfg:
         interval_range_s=(4.0, 4.0),
         params={},
     )
-    # disturbance on EVERY body part: a random 3D force + random torque applied to each rigid body
-    # (base AND every arm link), re-rolled every 0.2-0.5 s so the whole arm is randomly poked, not
-    # just shoved at the base. The earlier base-only velocity push was shrugged off (a shove at the
-    # low, wide CoM translates instead of tips); per-body forces at each link's COM propagate
-    # through the joints, so a random poke on the forearm destabilizes the robot like a real grab.
-    # asset_cfg with no body_names selects ALL bodies.
+    # disturbance on EVERY body part, magnitude gated by the difficulty curriculum: a random 3D
+    # force + random torque on each rigid body (base AND every arm link), re-rolled every 0.2-0.5 s.
+    # force/torque are multiplied by env.extras["push_scale"] (0 -> 1 via difficulty_curriculum), so
+    # there is NO disturbance until the robot can crawl, then it grows to full. asset_cfg with no
+    # body_names selects ALL bodies; forces at each link COM propagate through the joints.
     push_robot = EventTerm(
-        func=mdp.apply_external_force_torque,
+        func=mdp.disturb_all_bodies,
         mode="interval",
         interval_range_s=(0.2, 0.5),
         params={
             "asset_cfg": SceneEntityCfg("robot"),  # all rigid bodies
-            "force_range": (-0.4, 0.4),  # N, sampled independently per body per axis
-            "torque_range": (-0.03, 0.03),  # N*m, sampled independently per body per axis
+            "force_range": (-0.4, 0.4),  # N at full difficulty, sampled per body per axis
+            "torque_range": (-0.03, 0.03),  # N*m at full difficulty, sampled per body per axis
+            "scale_key": "push_scale",
         },
     )
     # off by default: actuator gain randomization (experimental)
@@ -394,6 +394,21 @@ class CrawlCurriculumCfg:
             "step_size": 0.05,
             "min_fraction": 0.6,
             "check_interval": 200,
+        },
+    )
+    # recovery/robustness staging: ramp fallen-start fraction + all-body disturbance 0 -> full ONLY
+    # after v_target has climbed to ~final (i.e. the robot is crawling). Reproduces, automatically,
+    # the manual "crawl -> +recovery -> +disturbance, resuming each time" chain that worked by hand.
+    difficulty = CurrTerm(
+        func=mdp.difficulty_curriculum,
+        params={
+            "start_after_v": 0.09,
+            "step_size": 0.05,
+            "check_interval": 100,
+            "min_fraction": 0.6,
+            "min_episode_fraction": 0.5,
+            "fallen_max": 0.5,
+            "push_max": 1.0,
         },
     )
 
@@ -522,6 +537,7 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
         if not self.use_curriculum:
             self.curriculum.v_target = None
             self.curriculum.friction_scale = None
+            self.curriculum.difficulty = None
             self.events.apply_friction_scale = None
             # without curriculum the v_target is constant at its final value
             self.v_target_start = self.v_target
@@ -676,7 +692,10 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
         # no curriculum: constant v_target at its final value
         self.curriculum.v_target = None
         self.curriculum.friction_scale = None
+        self.curriculum.difficulty = None
         self.events.apply_friction_scale = None
+        # deterministic eval: no live disturbance
+        self.events.push_robot = None
         self.v_target_start = self.v_target
 
 
@@ -706,6 +725,8 @@ class CrawlPlayEnvCfg(CrawlEnvCfg):
         self.events.reset_start_pose.params["joint_noise"] = 0.0
         self.events.reset_start_pose.params["xy_offset"] = 0.0
         self.events.reset_start_pose.params["yaw_range"] = (0.0, 0.0)
+        # deterministic eval: no live disturbance
+        self.events.push_robot = None
         # remove observation corruption
         self.observations.policy.enable_corruption = False
 
