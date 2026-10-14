@@ -382,7 +382,7 @@ class CrawlCurriculumCfg:
             "v_final": 0.10,
             "step_size": 0.005,
             "min_fraction": 0.6,
-            "min_episode_fraction": 0.5,
+            "min_escape": 0.5,
             "check_interval": 100,
         },
     )
@@ -397,8 +397,9 @@ class CrawlCurriculumCfg:
         },
     )
     # recovery/robustness staging: ramp fallen-start fraction + all-body disturbance 0 -> full ONLY
-    # after v_target has climbed to ~final (i.e. the robot is crawling). Reproduces, automatically,
-    # the manual "crawl -> +recovery -> +disturbance, resuming each time" chain that worked by hand.
+    # after the population reliably crawls OUT of the box (sustained out_of_bounds >= min_escape),
+    # then keeps ramping while forward progress holds. Reproduces, automatically, the manual
+    # "crawl -> +recovery -> +disturbance, resuming each time" chain that worked by hand.
     difficulty = CurrTerm(
         func=mdp.difficulty_curriculum,
         params={
@@ -406,7 +407,7 @@ class CrawlCurriculumCfg:
             "step_size": 0.05,
             "check_interval": 100,
             "min_fraction": 0.6,
-            "min_episode_fraction": 0.5,
+            "min_escape": 0.5,
             "fallen_max": 0.5,
             "push_max": 1.0,
         },

@@ -50,6 +50,25 @@ def _proj_vel_ema(env: "ManagerBasedEnv", tau: float = 2.0) -> float:
     return float(env.zombie_v_ema.mean())
 
 
+def _escape_rate(env: "ManagerBasedEnv", term: str = "out_of_bounds") -> float:
+    """Fraction of the population whose last episode ended by escaping the box.
+
+    This is the *real* "it can crawl" signal: the robot reaches the wall and leaves the
+    play field. We read the value the TerminationManager already logs every step
+    (``Episode_Termination/<term>``, the mean last-episode activation over all envs).
+
+    Why not mean episode length: a good crawler escapes the box *early*, so its episodes
+    get SHORT -- gating progress on "survive a long time" is self-defeating, because
+    success actively prevents the gate from passing (this is what froze the v_target ladder).
+    """
+    log = env.extras.get("log", {}) if hasattr(env, "extras") else {}
+    val = log.get(f"Episode_Termination/{term}", 0.0)
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def v_target_curriculum(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor,
@@ -57,10 +76,16 @@ def v_target_curriculum(
     v_final: float = 0.10,
     step_size: float = 0.005,
     min_fraction: float = 0.6,
-    min_episode_fraction: float = 0.5,
+    min_escape: float = 0.5,
     check_interval: int = 100,
 ) -> float:
-    """Advance ``env.v_target`` toward ``v_final`` as the population learns to crawl."""
+    """Advance ``env.v_target`` toward ``v_final`` as the population learns to crawl.
+
+    Gate: sustained forward speed (``mean_vx``) plus a sustained box-escape rate
+    (``out_of_bounds >= min_escape``). We deliberately do NOT gate on episode length --
+    see :func:`_escape_rate`; a good crawler escapes early, so long episodes are the wrong
+    success signal and froze the ladder at ``v_start``.
+    """
     if "zombie_curriculum_step" not in env.extras:
         env.extras["zombie_curriculum_step"] = 0
     env.extras["zombie_curriculum_step"] += 1
@@ -71,9 +96,8 @@ def v_target_curriculum(
         return float(v_target[0])
 
     mean_vx = _proj_vel_ema(env)  # sustained speed along the reference (jaw) axis
-    mean_episode_len = env.episode_length_buf.float().mean().item()
-    max_len = env.cfg.episode_length_s / env.cfg.decimation / env.cfg.sim.dt
-    if mean_vx > min_fraction * v_target[0] and mean_episode_len > min_episode_fraction * max_len:
+    escape = _escape_rate(env)  # fraction escaping the box last step
+    if mean_vx > min_fraction * v_target[0] and escape >= min_escape:
         if not getattr(env.cfg, "use_velocity_commands", False):
             env.v_target = torch.clamp(env.v_target + step_size, max=v_final)
             v_target = env.v_target
@@ -116,7 +140,7 @@ def difficulty_curriculum(
     step_size: float = 0.05,
     check_interval: int = 100,
     min_fraction: float = 0.6,
-    min_episode_fraction: float = 0.5,
+    min_escape: float = 0.5,
     fallen_max: float = 0.5,
     push_max: float = 1.0,
 ) -> dict:
@@ -130,11 +154,16 @@ def difficulty_curriculum(
     * ``env.extras["push_scale"]`` -- multiplier on the external-force disturbance, read by
       :func:`disturb_all_bodies`.
 
-    The whole point is STAGING that the from-scratch run showed was what the manual resume-chain was
-    doing by hand: the fragile forward gait must appear FIRST, so difficulty only advances once
-    ``v_target`` has essentially reached its final value (the robot is crawling well). Before that
-    the policy gets no fallen starts and no disturbance, exactly like the early phase of the
-    checkpoint chain. ``start_after_v`` is that gate.
+    Staging: the fragile forward gait must appear FIRST. Onset is gated on a sustained
+    box-escape rate (``out_of_bounds >= min_escape``) -- the true "it reliably crawls out"
+    signal -- instead of the old ``v_target >= start_after_v`` gate, which could never fire
+    because the v_target ladder itself was stuck (see :func:`_escape_rate`).
+
+    Once difficulty has begun (> 0), it keeps ramping as long as the population still crawls
+    forward (``mean_vx > min_fraction * v_target``). We intentionally do NOT re-check the escape
+    rate after onset: fallen spawns and pushes deliberately lower the escape rate, so re-checking
+    it would lock the ramp at its first step. ``mean_vx`` is the self-limiting signal -- if the
+    robot can no longer make forward progress under the difficulty, ramping pauses.
     """
     if "difficulty" not in env.extras:
         env.extras["difficulty"] = 0.0
@@ -164,14 +193,15 @@ def difficulty_curriculum(
         return _state()
 
     v_now = float(get_v_target(env).mean())
-    # gate: only start turning up difficulty once the robot is genuinely crawling
-    if v_now < start_after_v:
+    started = float(env.extras["difficulty"]) > 0.0
+    escape = _escape_rate(env)
+    # onset: only begin turning up difficulty once the population reliably crawls out of the box
+    if not started and escape < min_escape:
         return _state()
 
     mean_vx = _proj_vel_ema(env)
-    mean_episode_len = env.episode_length_buf.float().mean().item()
-    max_len = env.cfg.episode_length_s / env.cfg.decimation / env.cfg.sim.dt
-    if mean_vx > min_fraction * v_now and mean_episode_len > min_episode_fraction * max_len:
+    # continuation: keep ramping while the population still makes forward progress under the difficulty
+    if mean_vx > min_fraction * v_now:
         d = min(1.0, env.extras["difficulty"] + step_size)
         env.extras["difficulty"] = d
         env.extras["fallen_frac"] = fallen_max * d
