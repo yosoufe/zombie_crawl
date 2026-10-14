@@ -14,6 +14,8 @@ full capture rate.
 from __future__ import annotations
 
 import logging
+import os
+import re
 
 import numpy as np
 from isaaclab.envs.utils.video_recorder import VideoRecorder
@@ -31,8 +33,53 @@ class StreamingVideoRecorder(VideoRecorder):
         self._first_frame = None
         self._overlay = None
         self._overlay_failed = False
+        self._clip_labels: dict[int, str] = {}
         source = getattr(cfg, "source", "") or ""
         self._overlay_enabled = source.startswith("visualizer")
+
+    def _make_clip_label(self, index: int) -> str:
+        """Filename label embedding TensorBoard-aligned iteration + env-step ranges.
+
+        The recorder counts raw env steps (``_step_count``), restarting at 0 even on a resume.
+        rsl_rl logs every TensorBoard scalar at the learning iteration ``it`` and continues that
+        counter from the checkpoint, with ``global_step == it * num_steps_per_env``. So a clip
+        captured at recorder env-step ``S`` sits at TensorBoard iteration
+        ``offset + S / num_steps_per_env`` (``offset`` = the resume iteration, 0 from scratch).
+        Falls back to the base ``index``-only name when the timing hints are not supplied.
+        """
+        nsp = int(getattr(self.cfg, "zombie_num_steps_per_env", 0) or 0)
+        offset = int(getattr(self.cfg, "zombie_start_iter_offset", 0) or 0)
+        length = int(self.cfg.video_length)
+        start_step = int(self._step_count)
+        end_step = start_step + length
+        if nsp <= 0:
+            return f"{index:04d}"
+        start_iter = offset + start_step // nsp
+        end_iter = offset + end_step // nsp
+        return f"it{start_iter:05d}-{end_iter:05d}_step{start_step:07d}-{end_step:07d}_{index:04d}"
+
+    def _clip_path(self, index: int) -> str:
+        """Path for clip ``index``; the label is computed once (at clip open) and cached so a
+        later call for a past index still resolves to the file that was actually written."""
+        label = self._clip_labels.get(index)
+        if label is None:
+            label = self._make_clip_label(index)
+            self._clip_labels[index] = label
+        return os.path.join(self._effective_output_dir(), f"{self.cfg.output_filename_prefix}_{label}.mp4")
+
+    def _next_clip_index(self) -> int:
+        """First unused clip index. Tolerates the extended ``..._<index>.mp4`` names (the base
+        class regex only matches the plain ``<prefix>_<index>.mp4`` and would miss our clips)."""
+        output_dir = self._effective_output_dir()
+        if not os.path.isdir(output_dir):
+            return 0
+        pattern = re.compile(rf"^{re.escape(str(self.cfg.output_filename_prefix))}_.*?(?P<index>\d+)\.mp4$")
+        indices = [
+            int(match.group("index"))
+            for filename in os.listdir(output_dir)
+            if (match := pattern.match(filename)) is not None
+        ]
+        return max(indices, default=-1) + 1
 
     def step(self) -> None:
         """Same trigger logic as the base class, but frames go to the pipe, not a list."""

@@ -57,6 +57,7 @@ from zombie_crawl.assets import SoArm100Cfg
 from zombie_crawl.tasks.manager_based.crawl import mdp
 from zombie_crawl.tasks.manager_based.crawl.mdp.actions import OffsetEMAJointPositionToLimitsActionCfg
 from zombie_crawl.tasks.manager_based.crawl import video_flags
+from zombie_crawl.tasks.manager_based.crawl.agents.rsl_rl_ppo_cfg import NUM_STEPS_PER_ENV
 
 
 ##
@@ -658,22 +659,33 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
                 window_height=self.training_video_height,
             )
         ]
-        # 24 = runner num_steps_per_env (see CrawlPPORunnerCfg); keep in sync if changed
-        self.video_recorders = [
-            VideoRecorderCfg(
-                source="visualizer:kit",
-                video_length=self.training_video_length,
-                video_interval=self.training_video_interval_iters * 24,
-                output_filename_prefix="train_overview",
-                fps=None,  # auto: render_fps/frame_stride = 50 fps at full capture rate
-                # frames are streamed to ffmpeg via zombie_crawl's StreamingVideoRecorder (see
-                # streaming_recorder.py + the patch in the task __init__), so host RAM stays
-                # at ~one frame per clip. Full rate: frame_stride=1 -> smooth 40 s playback.
-                frame_stride=1,
-                step_offset=self.training_video_start_iters * 24 + 5,  # delay all clips past warm-up (see training_video_start_iters; +5 skips the first frames)
-                keep_last_n_clips=None,  # keep every clip on disk (was 10: the recorder deleted older clips mid-run)
-            )
-        ]
+        # Convert the iteration-based clip schedule into the recorder's raw env-step counter.
+        # ``NUM_STEPS_PER_ENV`` is imported from the PPO runner cfg (single source of truth):
+        # rsl_rl logs every TensorBoard scalar at iteration ``it`` and ``global_step == it * nsp``,
+        # so step<->iteration conversion MUST use the real per-iteration step count. A stale
+        # literal 24 here (vs the real 40) skewed every clip ~1.67x relative to TensorBoard.
+        nsp = int(NUM_STEPS_PER_ENV)
+        warm_up = 5  # skip the first frames (RTX warm-up) of the run
+        recorder_cfg = VideoRecorderCfg(
+            source="visualizer:kit",
+            video_length=self.training_video_length,
+            video_interval=self.training_video_interval_iters * nsp,
+            output_filename_prefix="train_overview",
+            fps=None,  # auto: render_fps/frame_stride = 50 fps at full capture rate
+            # frames are streamed to ffmpeg via zombie_crawl's StreamingVideoRecorder (see
+            # streaming_recorder.py + the patch in the task __init__), so host RAM stays
+            # at ~one frame per clip. Full rate: frame_stride=1 -> smooth 40 s playback.
+            frame_stride=1,
+            step_offset=self.training_video_start_iters * nsp + warm_up,  # delay clips past warm-up
+            keep_last_n_clips=None,  # keep every clip on disk (never auto-delete training clips)
+        )
+        # Extra hints consumed by StreamingVideoRecorder to bake TensorBoard-aligned iteration/
+        # step ranges into each clip filename (see streaming_recorder.py). The recorder's own
+        # step counter restarts at 0 even on a ``--checkpoint`` resume, so the filename adds
+        # training_video_start_offset to line up with the TensorBoard ``it`` axis.
+        recorder_cfg.zombie_num_steps_per_env = nsp
+        recorder_cfg.zombie_start_iter_offset = int(video_flags.training_video_start_offset or 0)
+        self.video_recorders = [recorder_cfg]
 
     def play_mode(self):
         """Deterministic play/evaluation variant: no randomization, no curriculum, single start pose.

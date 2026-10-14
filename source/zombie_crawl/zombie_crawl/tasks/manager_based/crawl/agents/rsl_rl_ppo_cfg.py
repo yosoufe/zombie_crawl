@@ -18,13 +18,21 @@ from isaaclab_rl.rsl_rl import (
     RslRlPpoAlgorithmCfg,
 )
 
+# Single source of truth for the runner's rollout length. The training-video timing in
+# ``CrawlEnvCfg._setup_training_video`` divides/ multiplies env steps by this SAME value to
+# convert between the recorder's raw env-step counter and the TensorBoard iteration axis
+# (rsl_rl logs every scalar at ``it``, and ``global_step == it * NUM_STEPS_PER_ENV``). Keep the
+# video math importing this constant instead of re-hardcoding 24/40 -- a stale 24 here vs the
+# real 40 skewed every training clip ~1.67x relative to TensorBoard.
+NUM_STEPS_PER_ENV = 40
+
 
 @configclass
 class CrawlPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """PPO runner configuration for the zombie crawl task."""
 
     # -- runner --------------------------------------------------------------------
-    num_steps_per_env = 40
+    num_steps_per_env = NUM_STEPS_PER_ENV
     """Steps per environment per rollout (40 x 0.02 s = 0.8 s of experience; lengthened from 24
     to give credit for the turn-then-crawl chain somewhere to propagate)."""
     max_iterations = 3000

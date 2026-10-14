@@ -34,3 +34,13 @@ training_video_start_iters: int | None = None
 captured). Use ``--video_start_iters 1`` to record a clip immediately (e.g. to validate the
 vector overlay on an untrained policy) instead of the default post-warm-up iteration.
 """
+
+training_video_start_offset: int = 0
+"""Absolute PPO iteration this run's TensorBoard axis starts at, set by ``scripts/train.py``.
+0 for a from-scratch run; for a ``--checkpoint model_N.pt`` resume it is ``N`` (the checkpoint's
+stored ``iter``). The video recorder's own step counter always restarts at 0 (it is rebuilt
+when the env is created, before the runner loads the checkpoint), but rsl_rl *continues* logging
+TensorBoard scalars from ``N``. So a clip recorded at recorder env-step ``S`` sits at TensorBoard
+iteration ``training_video_start_offset + S / num_steps_per_env`` -- the offset is what lets the
+clip filename line up with the matching point on the TensorBoard curve even after a resume.
+"""

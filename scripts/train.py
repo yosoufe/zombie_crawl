@@ -60,6 +60,28 @@ if __name__ == "__main__":
             video_flags.training_video_start_iters = int(a.split("=", 1)[1])
             argv.pop(i)
             break
+    # --checkpoint model_N.pt: capture the resume offset so training-clip filenames can line up
+    # with the TensorBoard iteration axis. rsl_rl CONTINUES logging from the checkpoint's stored
+    # iter (N), but the video recorder rebuilds its step counter at 0, so the filename must add N.
+    # The token is intentionally NOT stripped here -- the unified launcher still needs it to resume.
+    import re as _re
+
+    for i, a in enumerate(argv):
+        if a == "--checkpoint" and i + 1 < len(argv):
+            _ckpt = argv[i + 1]
+        elif a.startswith("--checkpoint="):
+            _ckpt = a.split("=", 1)[1]
+        else:
+            continue
+        _m = _re.search(r"model_(\d+)\.pt$", os.path.basename(_ckpt))
+        if _m:
+            video_flags.training_video_start_offset = int(_m.group(1))
+            print(
+                f"[INFO] --video resume offset: TensorBoard it-axis starts at "
+                f"{int(_m.group(1))} (from {os.path.basename(_ckpt)}); training-clip filenames "
+                f"will be shifted to match."
+            )
+        break
     # see CrawlEnvCfg._setup_training_video: --video adds a single world-space viewer
     # camera + interval-based recorder via the process-local flag (fresh 4K clip every 25 iters)
     if "--video" in argv:
