@@ -111,9 +111,14 @@ def friction_curriculum(
     scale_final: float = 1.0,
     step_size: float = 0.05,
     min_fraction: float = 0.6,
+    min_escape: float = 0.5,
     check_interval: int = 200,
 ) -> float:
-    """Decay the extra friction multiplier toward 1.0 as the population learns to crawl."""
+    """Decay the extra friction multiplier toward 1.0 as the population learns to crawl.
+
+    Same escape-rate gate as ``v_target_curriculum`` -- NOT episode length (a good crawler
+    escapes early, so long episodes are the wrong success signal; see :func:`_escape_rate`).
+    """
     if "zombie_friction_step" not in env.extras:
         env.extras["zombie_friction_step"] = 0
         env.extras["friction_scale"] = torch.tensor(
@@ -126,8 +131,8 @@ def friction_curriculum(
         return float(scale)
 
     mean_vx = _proj_vel_ema(env)  # sustained speed along the reference (jaw) axis
-    mean_episode_len = env.episode_length_buf.float().mean().item()
-    if mean_vx > min_fraction * get_v_target(env).mean() and mean_episode_len > 0.5 * env.max_episode_length:
+    escape = _escape_rate(env)  # fraction escaping the box last step
+    if mean_vx > min_fraction * get_v_target(env).mean() and escape >= min_escape:
         scale = torch.clamp(scale - step_size, min=scale_final)
         env.extras["friction_scale"] = scale
     return float(scale)
@@ -143,6 +148,7 @@ def difficulty_curriculum(
     min_escape: float = 0.5,
     fallen_max: float = 0.5,
     push_max: float = 1.0,
+    push_start_frac: float = 0.5,
 ) -> dict:
     """Ramp the recovery/robustness difficulty 0 -> 1, ONLY after the crawl is established.
 
@@ -164,6 +170,11 @@ def difficulty_curriculum(
     rate after onset: fallen spawns and pushes deliberately lower the escape rate, so re-checking
     it would lock the ramp at its first step. ``mean_vx`` is the self-limiting signal -- if the
     robot can no longer make forward progress under the difficulty, ramping pauses.
+
+    Within Phase 2 the two sub-channels are STAGGERED by ``push_start_frac``: the robot learns to
+    get UP from fallen spawns first (``fallen_frac`` fills over ``difficulty`` in ``[0, f]``), and
+    only once it can do that does the external disturbance turn on (``push_scale`` fills over
+    ``difficulty`` in ``[f, 1]``). Don't shove the robot until it can already recover on its own.
     """
     if "difficulty" not in env.extras:
         env.extras["difficulty"] = 0.0
@@ -204,6 +215,8 @@ def difficulty_curriculum(
     if mean_vx > min_fraction * v_now:
         d = min(1.0, env.extras["difficulty"] + step_size)
         env.extras["difficulty"] = d
-        env.extras["fallen_frac"] = fallen_max * d
-        env.extras["push_scale"] = push_max * d
+        # staggered: fallen spawns fill over [0, f], pushes only fill over [f, 1]
+        f = min(max(push_start_frac, 1e-6), 1.0 - 1e-6)
+        env.extras["fallen_frac"] = fallen_max * min(1.0, d / f)
+        env.extras["push_scale"] = push_max * max(0.0, min(1.0, (d - f) / (1.0 - f)))
     return _state()

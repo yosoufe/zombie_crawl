@@ -393,13 +393,14 @@ class CrawlCurriculumCfg:
             "scale_final": 1.0,
             "step_size": 0.05,
             "min_fraction": 0.6,
+            "min_escape": 0.5,
             "check_interval": 200,
         },
     )
     # recovery/robustness staging: ramp fallen-start fraction + all-body disturbance 0 -> full ONLY
     # after the population reliably crawls OUT of the box (sustained out_of_bounds >= min_escape),
-    # then keeps ramping while forward progress holds. Reproduces, automatically, the manual
-    # "crawl -> +recovery -> +disturbance, resuming each time" chain that worked by hand.
+    # then keeps ramping while forward progress holds. Within Phase 2 the sub-channels are STAGGERED:
+    # fallen starts fill first (learn to get UP), pushes only turn on afterwards (push_start_frac).
     difficulty = CurrTerm(
         func=mdp.difficulty_curriculum,
         params={
@@ -410,6 +411,7 @@ class CrawlCurriculumCfg:
             "min_escape": 0.5,
             "fallen_max": 0.5,
             "push_max": 1.0,
+            "push_start_frac": 0.5,
         },
     )
 
