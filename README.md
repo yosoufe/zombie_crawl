@@ -12,6 +12,10 @@ the **curriculum**.
 randomly commanded headings (single world-space viewer camera, one clip every 200 PPO
 iterations). 4K source: `docs/assets/zombie_crawl_discord.mp4`.*
 
+> [!NOTE]
+> The whole repo was **vibe-coded** with [opencode](https://opencode.ai) using the
+> **Qwen3.8-flash-next** model — and it works.
+
 Source of truth (all under `source/zombie_crawl/zombie_crawl/tasks/manager_based/crawl/`):
 
 | Concern           | File                                        |
