@@ -259,8 +259,8 @@ range (now limits-relative, §2).
 ## Run
 
 ```bash
-source /home/yousof/robotics/experimental/zombie_crawl/scripts/env.sh
-cd /home/yousof/robotics/experimental/zombie_crawl
+# from the repo root:
+source scripts/env.sh
 ```
 
 > The `zombie_crawl` package is installed **editable from the main repo**, so a curriculum
