@@ -281,3 +281,17 @@ def disturb_all_bodies(
     asset.permanent_wrench_composer.set_forces_and_torques_index(
         forces=forces, torques=torques, body_ids=asset_cfg.body_ids, env_ids=env_ids
     )
+    # remember the wrench currently applied per (env, body) so the video overlay can draw a
+    # red disturbance arrow at each body COM; the permanent composer holds these exact
+    # values until the next interval fire, so this buffer mirrors the live disturbance
+    buf = env.extras.get("disturb_forces")
+    if buf is None or buf.shape != (env.num_envs, asset.num_bodies, 3):
+        buf = torch.zeros(env.num_envs, asset.num_bodies, 3, device=asset.device)
+        env.extras["disturb_forces"] = buf
+    env_idx = _normalize_env_ids(env, env_ids, asset.device)
+    body_ids = asset_cfg.body_ids if isinstance(asset_cfg.body_ids, slice) else slice(None)
+    buf[env_idx, body_ids, :] = forces
+    # per-axis force ceiling actually in effect, in the worst-case-|f| units the red video
+    # arrow normalizes by (sqrt(3) * axis max), so the arrow length stays meaningful no
+    # matter how the config scales the ranges
+    env.extras["disturb_force_ref"] = max(1e-6, scale * max(abs(force_range[0]), abs(force_range[1])) * math.sqrt(3))

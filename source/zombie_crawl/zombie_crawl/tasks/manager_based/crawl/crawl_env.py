@@ -49,6 +49,7 @@ class CrawlRLEnv(ManagerBasedRLEnv):
             self.sim.set_setting("/physics/fabricUpdateTransformations", True)
 
 
-class CrawlPlayRLEnv(ManagerBasedRLEnv):
-    """Play/eval env: identical to the base env, but importing it here guarantees the
-    streaming-video patch is applied for the deterministic play/eval recorders too."""
+class CrawlPlayRLEnv(CrawlRLEnv):
+    """Play/eval env: identical to :class:`CrawlRLEnv` (so the ``-Play`` task also gets the
+    streaming-video patch AND the render/Fabric settings the single world-space viewer needs
+    when play.py records with the training-video spec)."""

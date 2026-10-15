@@ -476,6 +476,12 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
     video_height: int = 720
     """Video camera image height [px]."""
 
+    play_video_num_envs: int = 4096
+    """Robots in the scene for ``play.py --video`` training-spec playback (same 4096-env
+    population a training overview clip frames; see :attr:`video_flags.play_video_training_spec`)."""
+    play_video_push_multiplier: float = 1.0
+    """Multiplier on the training disturbance force/torque ranges for ``play.py --video``
+    playback (1.0 = exactly the training disturbance; e.g. 2.0 for a harsher demo clip)."""
     record_training_video: bool = False
     """When True, record live training videos from a SINGLE world-space viewer camera
     (one ``KitVisualizer`` with ``origin_type="world"`` that frames the grid centre, so a
@@ -554,8 +560,9 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
         if self.record_video or video_flags.sensor_video_enabled:
             self.record_video = True
             self._setup_video_recording()
-        # live training video: single headless viewport camera + interval-based recorder (train.py --video)
-        if self.record_training_video or video_flags.training_video_enabled:
+        # live training video: single headless viewport camera + interval-based recorder (train.py --video),
+        # or the training-spec play clip (play.py --video: same camera/population, recording from spawn)
+        if self.record_training_video or video_flags.training_video_enabled or video_flags.play_video_training_spec:
             self.record_training_video = True
             self._setup_training_video()
 
@@ -669,34 +676,101 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
         # literal 24 here (vs the real 40) skewed every clip ~1.67x relative to TensorBoard.
         nsp = int(NUM_STEPS_PER_ENV)
         warm_up = 5  # skip the first frames (RTX warm-up) of the run
+        if video_flags.play_video_training_spec:
+            # Play spec: ONE clip that starts at the spawn moment (recorder step counter
+            # starts at 0 with the env's initial reset, so the only delay is the RTX
+            # warm-up) and runs training_video_length env steps. video_interval=0 keeps the
+            # recorder inactive after that single clip. No TensorBoard-axis filename hints
+            # (there is no learning iteration in a play run -> plain _<index> filenames).
+            step_offset = warm_up
+            video_interval = 0
+            filename_prefix = "play_overview"
+            hint_nsp = 0
+        else:
+            step_offset = self.training_video_start_iters * nsp + warm_up  # delay clips past warm-up
+            video_interval = self.training_video_interval_iters * nsp
+            filename_prefix = "train_overview"
+            hint_nsp = nsp
         recorder_cfg = VideoRecorderCfg(
             source="visualizer:kit",
             video_length=self.training_video_length,
-            video_interval=self.training_video_interval_iters * nsp,
-            output_filename_prefix="train_overview",
+            video_interval=video_interval,
+            output_filename_prefix=filename_prefix,
             fps=None,  # auto: render_fps/frame_stride = 50 fps at full capture rate
             # frames are streamed to ffmpeg via zombie_crawl's StreamingVideoRecorder (see
             # streaming_recorder.py + the patch in the task __init__), so host RAM stays
             # at ~one frame per clip. Full rate: frame_stride=1 -> smooth 40 s playback.
             frame_stride=1,
-            step_offset=self.training_video_start_iters * nsp + warm_up,  # delay clips past warm-up
+            step_offset=step_offset,
             keep_last_n_clips=None,  # keep every clip on disk (never auto-delete training clips)
         )
         # Extra hints consumed by StreamingVideoRecorder to bake TensorBoard-aligned iteration/
         # step ranges into each clip filename (see streaming_recorder.py). The recorder's own
         # step counter restarts at 0 even on a ``--checkpoint`` resume, so the filename adds
         # training_video_start_offset to line up with the TensorBoard ``it`` axis.
-        recorder_cfg.zombie_num_steps_per_env = nsp
+        recorder_cfg.zombie_num_steps_per_env = hint_nsp
         recorder_cfg.zombie_start_iter_offset = int(video_flags.training_video_start_offset or 0)
         self.video_recorders = [recorder_cfg]
+
+    def _apply_training_video_play_spec(self) -> None:
+        """Keep the play scene identical to a training run (used by ``play.py --video``).
+
+        The clip is meant to be indistinguishable from a training overview clip except that
+        it starts at the spawn moment, so the population and the difficulty dials stay at
+        their training values:
+
+        * ``play_video_num_envs`` (4096) robots in the grid (the single world-space viewer
+          camera is set up by :meth:`_setup_training_video`),
+        * full-strength disturbance: ``push_robot`` stays active and, with no curriculum
+          running, ``env.extras`` never gains a ``push_scale`` key, so
+          :func:`mdp.disturb_all_bodies` falls back to scale 1.0 (the post-curriculum
+          training value),
+        * 50% fallen starts: without ``env.extras["fallen_frac"]`` (difficulty curriculum
+          removed) :func:`mdp.reset_start_pose` uses the baked training ``pose_weights``
+          (0.5, 0.25, 0.25), and spawn noise/offset/yaw randomization stay as in training,
+        * per-env ground-friction randomization stays at the training range.
+
+        The disturbance/spawn/friction values are re-applied from a fresh
+        :class:`CrawlEventsCfg` (the single source of truth for the training defaults)
+        instead of being repeated here, so this stays in lock-step with training and the
+        method also restores events a previous deterministic pass disabled.
+        """
+        self.scene.num_envs = self.play_video_num_envs
+        training_events = CrawlEventsCfg()
+        self.events.randomize_ground_friction.params = dict(training_events.randomize_ground_friction.params)
+        self.events.reset_start_pose.params = dict(training_events.reset_start_pose.params)
+        if self.events.push_robot is None:
+            self.events.push_robot = training_events.push_robot
+        # programmable disturbance scaling for the play clip (1.0 = exactly the training
+        # wrench; the red overlay arrow auto-rescales via env.extras["disturb_force_ref"])
+        if self.play_video_push_multiplier != 1.0:
+            push_params = self.events.push_robot.params
+            push_params["force_range"] = tuple(self.play_video_push_multiplier * f for f in push_params["force_range"])
+            push_params["torque_range"] = tuple(self.play_video_push_multiplier * t for t in push_params["torque_range"])
 
     def play_mode(self):
         """Deterministic play/evaluation variant: no randomization, no curriculum, single start pose.
 
         Called by the play entrypoint (Isaac Lab 3.0 replaces the separate ``-Play`` env with
         this method). Also applied by ``scripts/evaluate.py``.
+
+        Exception: with ``video_flags.play_video_training_spec`` (set by ``scripts/play.py``
+        from ``--video``) the scene instead mirrors a training run exactly — 4096 robots,
+        single world-space viewer camera, full disturbances and 50% fallen starts — so the
+        clip matches a training overview video (see
+        :attr:`zombie_crawl.tasks.manager_based.crawl.video_flags.play_video_training_spec`).
         """
         super().play_mode()
+        # no curriculum: constant v_target at its final value
+        self.curriculum.v_target = None
+        self.curriculum.friction_scale = None
+        self.curriculum.difficulty = None
+        self.events.apply_friction_scale = None
+        self.v_target_start = self.v_target
+        if video_flags.play_video_training_spec:
+            # training-spec play clip: keep the full population + disturbance + fallen starts
+            self._apply_training_video_play_spec()
+            return
         # small scene for playback; a single env when video recording is active (the scene
         # cameras render one env per view, and the deterministic play path frames env_0)
         self.scene.num_envs = 1 if self.record_video else min(self.scene.num_envs, 8)
@@ -707,14 +781,8 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
         self.events.reset_start_pose.params["joint_noise"] = 0.0
         self.events.reset_start_pose.params["xy_offset"] = 0.0
         self.events.reset_start_pose.params["yaw_range"] = (0.0, 0.0)
-        # no curriculum: constant v_target at its final value
-        self.curriculum.v_target = None
-        self.curriculum.friction_scale = None
-        self.curriculum.difficulty = None
-        self.events.apply_friction_scale = None
         # deterministic eval: no live disturbance
         self.events.push_robot = None
-        self.v_target_start = self.v_target
 
 
 @configclass
@@ -735,7 +803,16 @@ class CrawlPlayEnvCfg(CrawlEnvCfg):
         # the deterministic play/evaluation video cheap (the play path frames env_0 anyway)
         if self.record_video or video_flags.sensor_video_enabled:
             self.num_envs = 1
+        # training-spec play clip: same 4096-robot population a training clip frames
+        if video_flags.play_video_training_spec:
+            self.num_envs = self.play_video_num_envs
         super().__post_init__()
+        if video_flags.play_video_training_spec:
+            # keep the scene identical to a training run (full disturbance, 50% fallen
+            # starts, spawn/friction randomization) -- only the curriculum is frozen
+            self._apply_training_video_play_spec()
+            self.observations.policy.enable_corruption = False
+            return
         # freeze the friction randomization at the default (multiplier 1.0)
         self.events.randomize_ground_friction.params["friction_range"] = (1.0, 1.0)
         # single, deterministic start pose
@@ -749,5 +826,6 @@ class CrawlPlayEnvCfg(CrawlEnvCfg):
         self.observations.policy.enable_corruption = False
 
     def play_mode(self):
-        # already deterministic; nothing to change
+        # deterministic by construction; the training-spec variant was configured in
+        # __post_init__ (video_flags.play_video_training_spec), nothing left to change
         return

@@ -28,6 +28,16 @@ training robots is written every N PPO iterations (see
 path (how-to: "Recording video clips during training").
 """
 
+play_video_training_spec: bool = False
+"""When set by ``scripts/play.py`` from ``--video``, playback records with the EXACT
+training-video spec: the single world-space viewer camera + 4K recorder of
+:meth:`CrawlEnvCfg._setup_training_video` (instead of the per-env sensor camera pair),
+``play_video_num_envs`` (4096) robots in the scene, and the training disturbances and
+fallen-start rate kept at their full training values (push_scale=1.0, fallen 50%).
+The only deviation from a training clip: recording starts at the spawn moment
+(clip step-offset = RTX warm-up only, no 200-iteration delay).
+"""
+
 training_video_start_iters: int | None = None
 """When set by ``scripts/train.py`` from ``--video_start_iters N``, overrides
 ``CrawlEnvCfg.training_video_start_iters`` (the PPO iteration at which the first clip is
