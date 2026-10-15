@@ -163,22 +163,36 @@ feedback loop containing a std blow-up — kept on for that reason.
 ## 3. Termination conditions
 
 **Design intent: tipping over is *allowed*.** A crawler may flip itself; that is *not* a failure
-(recovery, §1 term 9, pays for getting back up). Episodes end only on numerical failure, being
-flung into the air, leaving the bounding area, the stall guard, or the time limit.
+(recovery, §1 term 9, pays for getting back up). Episodes end only in success (crawled out of the
+box), on a guard failure (numerical blow-up, flung into the air, stalled out), or at the time limit.
 
-| Term | Trigger | Type |
-|------|---------|------|
-| `time_out` | episode reaches **20 s** | truncation (bootstrap) |
-| `base_nan` | any NaN/Inf in root or joint state | failure |
-| `base_too_high` | base origin z > **0.45 m** (physics-exploit guard) | failure |
-| `out_of_bounds` | \|dx\| > **2.5 m** or \|dy\| > **1.5 m** from the env origin | failure (and the **success signal** for the curriculum) |
-| `stalled` | < **0.05 m** progress along the command axis within **12 s** | failure |
+**`out_of_bounds` is the goal, not a failure.** Reaching the box edge means the robot crawled the
+commanded distance — it is the success condition and the curriculum's escape gate (§4).
 
-`out_of_bounds` is deliberately the curriculum's "it can actually crawl" gate: a good crawler leaves
-the box, so **escaping early is the success evidence** (see §4). Note that `evaluate.py` currently
-buckets any early `done` (including `out_of_bounds`) as a failure and drops those episodes from the
-displacement stats — so read the eval's termination breakdown, not just its displacement, before
-judging a policy.
+| Term | Trigger | Outcome / bootstrap |
+|------|---------|---------------------|
+| `time_out` | episode reaches **20 s** | **truncation** (bootstrap `V(s)`) |
+| `base_nan` | any NaN/Inf in root or joint state | guard failure (terminal, value 0) |
+| `base_too_high` | base origin z > **0.45 m** (physics-exploit guard) | guard failure (terminal, value 0) |
+| `out_of_bounds` | \|dx\| > **2.5 m** or \|dy\| > **1.5 m** from the env origin | **success** (terminal, value 0) |
+| `stalled` | < **0.05 m** progress along the command axis within **12 s** | guard failure (terminal, value 0) |
+
+> [!NOTE]
+> In Isaac Lab a termination is only ever a **terminal** (`time_out=False` → value target 0) or a
+> **truncation** (`time_out=True` → bootstrap `V(s)`); there is **no first-class "success" flag** —
+> good-vs-bad is just bookkeeping. So the only thing that actually matters is *bootstrap or not*:
+> - **`out_of_bounds` is correctly a plain terminal (value 0)** — this is not a penalty. A robot that
+>   has left the play field has no meaningful future state to bootstrap, and the termination predicate
+>   adds **no negative reward** (only the §1 reward terms pay). Escaping is rewarded purely by
+>   `forward_velocity`/`forward_progress` and then simply ends the episode. Calling it a "failure" would
+>   be wrong — it is the success signal the curriculum gates on.
+> - Only `time_out` is a truncation, because a 20 s cutoff is artificial and its value *should* be
+>   bootstrapped. The guard terms (`base_nan`/`base_too_high`/`stalled`) are genuine failures and are
+>   terminals on purpose, so "doing nothing"/exploiting reads as value 0.
+
+Caveat: `evaluate.py` currently buckets **any** early `done` (including `out_of_bounds`) as an early
+termination and drops those episodes from the displacement stats — so read the eval's termination
+breakdown, not just its displacement, before judging a policy.
 
 ---
 
