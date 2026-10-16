@@ -60,11 +60,16 @@ def heading_error_wrist(
     and the commanded direction.
 
     Pointing direction = world-frame horizontal projection of the arrow from the base origin
-    to the WRIST body (down the arm toward the jaws). ``env.zombie_ref_yaw`` (drawn by
-    ``mdp.reset_start_pose``) is a uniform +-180 deg COMMAND per episode, so this term IS the
-    command signal for the actor: (1, 0) means "point where you must crawl". It matches what
-    the ``wrist_pointing_error`` reward measures. Returns (num_envs, 2); cos/sin are wrap-invariant.
+    to the WRIST body (down the arm toward the jaws). The commanded direction comes from
+    ``mdp.get_ref_dir``: the ``crawl_heading`` CommandManager term when ``use_dynamic_heading``
+    is on (so it JUMPS mid-episode when the target rotates), or the frozen per-episode
+    ``env.zombie_ref_yaw`` draw from ``mdp.reset_start_pose`` otherwise. Either way it is a
+    uniform +-180 deg COMMAND, so this term IS the command signal for the actor: (1, 0) means
+    "point where you must crawl". It matches what the ``wrist_pointing_error`` reward
+    measures. Returns (num_envs, 2); cos/sin are wrap-invariant.
     """
+    from .rewards import get_ref_dir
+
     asset = env.scene[asset_cfg.name]
     wrist_ids = getattr(env, "zombie_wrist_body_ids", None)
     if wrist_ids is None:
@@ -76,8 +81,9 @@ def heading_error_wrist(
     wrist = asset.data.body_pos_w.torch[:, wrist_ids[0]]
     base = asset.data.root_pos_w.torch
     arrow_yaw = torch.atan2(wrist[:, 1] - base[:, 1], wrist[:, 0] - base[:, 0])
-    ref = getattr(env, "zombie_ref_yaw", None)
-    if ref is None or ref.shape[0] != base.shape[0]:
-        ref = torch.zeros(base.shape[0], device=base.device)
-    d = arrow_yaw - ref
+    cos_ref, sin_ref = get_ref_dir(env)
+    d = torch.atan2(
+        torch.sin(arrow_yaw) * cos_ref - torch.cos(arrow_yaw) * sin_ref,  # sin(arrow - ref)
+        torch.cos(arrow_yaw) * cos_ref + torch.sin(arrow_yaw) * sin_ref,  # cos(arrow - ref)
+    )
     return torch.stack([torch.cos(d), torch.sin(d)], dim=-1)

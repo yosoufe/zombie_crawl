@@ -54,9 +54,12 @@ def reset_start_pose(
 
     Each pose entry maps a name to ``{"pos": (x, y, z), "rot": (roll, pitch, yaw), "joint_pos": {name: rad}}``.
     On top of the named pose the function adds: a uniform yaw in ``yaw_range``, a small x/y
-    offset, uniform joint noise, and zero velocity. The final spawn yaw is stored on
-    ``env.zombie_ref_yaw`` — a uniform +-180 deg COMMAND direction, independent of the spawn
-    facing; rewards and curriculum score progress along it for the whole episode.
+    offset, uniform joint noise, and zero velocity. The command direction is stored on
+    ``env.zombie_ref_yaw`` — a uniform +-180 deg draw, independent of the spawn facing;
+    rewards and curriculum score progress along it for the whole episode. With
+    ``use_dynamic_heading`` the ``mdp.UniformCrawlHeadingCommand`` command term owns the
+    direction instead (mid-episode resampled; ``mdp.get_ref_dir`` prefers it and this draw
+    only randomizes the spawn facing).
     """
     asset: Articulation = env.scene[asset_cfg.name]
     device = asset.device

@@ -47,6 +47,13 @@ def _proj_vel_ema(env: "ManagerBasedEnv", tau: float = 2.0) -> float:
         env.zombie_v_ema = v_proj.clone()
         return float(env.zombie_v_ema.mean())
     ema += (v_proj - ema) * min(1.0, dt / tau)
+    # a mid-episode command resample changes the projection axis for those envs; the
+    # accumulated EMA mixes the old and new axes -> restart it there instead
+    from .rewards import crawl_heading_resample_flag
+
+    resampled = crawl_heading_resample_flag(env)
+    if resampled is not None and resampled.any():
+        ema[resampled] = v_proj[resampled]
     return float(env.zombie_v_ema.mean())
 
 

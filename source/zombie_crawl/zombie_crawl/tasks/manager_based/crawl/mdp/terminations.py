@@ -75,20 +75,33 @@ def stalled(
     heading happens to be perpendicular to +X. This is a *failure* termination (not a
     timeout), so the value function treats "doing nothing" as bad rather than as a free ride.
     """
-    from .rewards import get_ref_dir
+    from .rewards import crawl_heading_resample_flag, get_ref_dir
 
     asset = env.scene[asset_cfg.name]
     pos_xy = asset.data.root_pos_w.torch[:, :2]
+    el = env.episode_length_buf
     start_xy = getattr(env, "zombie_start_xy", None)
     if start_xy is None or start_xy.shape[0] != pos_xy.shape[0]:
         env.zombie_start_xy = pos_xy.clone()
+        # episode step at which each env's current stall window opened (episode_length_buf
+        # is env-owned and drives time_out; we keep our own anchor instead of touching it)
+        env.zombie_stall_anchor = torch.zeros_like(el)
     else:
-        just_reset = env.episode_length_buf <= 1
+        if not hasattr(env, "zombie_stall_anchor") or env.zombie_stall_anchor.shape != el.shape:
+            env.zombie_stall_anchor = torch.zeros_like(el)
+        just_reset = el <= 1
         if just_reset.any():
             env.zombie_start_xy[just_reset] = pos_xy[just_reset]
+            env.zombie_stall_anchor[just_reset] = el[just_reset]
+        # with a dynamic commanded heading, displacement along the OLD axis says nothing
+        # about the NEW command: re-anchor position AND restart the stall window on resample
+        resampled = crawl_heading_resample_flag(env)
+        if resampled is not None and resampled.any():
+            env.zombie_start_xy[resampled] = pos_xy[resampled]
+            env.zombie_stall_anchor[resampled] = el[resampled]
     cos_ref, sin_ref = get_ref_dir(env)
     dx = (pos_xy[:, 0] - env.zombie_start_xy[:, 0]) * cos_ref + (
         pos_xy[:, 1] - env.zombie_start_xy[:, 1]
     ) * sin_ref
     stall_steps = int(round(stall_time_s / (env.cfg.decimation * env.cfg.sim.dt)))
-    return (env.episode_length_buf > stall_steps) & (dx.abs() < min_displacement)
+    return (el - env.zombie_stall_anchor > stall_steps) & (dx.abs() < min_displacement)

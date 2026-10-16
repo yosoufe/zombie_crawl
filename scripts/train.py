@@ -13,6 +13,21 @@ importing the package before dispatch, so the standard CLI is used unchanged:
     python scripts/train.py --task Zombie-Crawl-SO100-v0 --num_envs 64 --max_iterations 100 --headless
     python scripts/train.py --task Zombie-Crawl-SO100-v0 --num_envs 64 --max_iterations 100 --viz kit
 
+Dynamic commanded heading (mid-episode resampled crawl direction, per env, staggered):
+append the Hydra override ``env.use_dynamic_heading=true`` (optionally with
+``env.heading_resample_range=[6,12]`` [s], ``env.heading_range=[-3.1416,3.1416]``):
+
+    python scripts/train.py --task Zombie-Crawl-SO100-v0 env.use_dynamic_heading=true \\
+        --num_envs 2048 --max_iterations 3000
+
+Curriculum-staged like disturbances: the command only starts JUMPING once the global
+curriculum difficulty reaches ``env.heading_curriculum_frac`` (default 0.75 -- after
+fallen spawns [0, 0.5] and pushes [0.5, 1]). Before the gate the heading is frozen per
+episode (v0 behaviour). Use ``env.heading_curriculum_frac=0`` for dynamic from step one.
+Watch ``Metrics/crawl_heading/gate_open`` (0 until unlock) and
+``Metrics/crawl_heading/resamples_per_episode`` in TensorBoard.
+Off by default -> the frozen per-episode command direction (v0 behaviour) is unchanged.
+
 ``--headless`` is accepted for compatibility with Isaac Lab 2.x command lines: the
 unified 3.0 launcher CLI no longer registers the flag (headless is the default when
 no visualizer is requested), and forwarding it as-is would crash Hydra's override
@@ -98,6 +113,14 @@ if __name__ == "__main__":
             "viewer, not per-env), and only during each ~10 s clip window (500 of every "
             "600 env steps) - independent of num_envs. For a high-res video of a finished "
             "policy use play.py --video on a checkpoint."
+        )
+    # --viz kit -> live GUI arrows: the env drives the cyan/red vector-arrow overlay every
+    # step so the GUI window shows them continuously, not just inside --video clip windows
+    if video_flags.enable_gui_overlay_from_argv(argv):
+        print(
+            "[INFO] --viz kit: live vector-arrow overlay ON -- cyan = commanded crawl "
+            "direction per robot, red = current disturbance force per rigid body "
+            "(updated every env step in the GUI window)."
         )
     # --headless compatibility: the unified Isaac Lab 3.0 launcher CLI no longer
     # registers the flag, so translate it to HEADLESS=1 (which the launcher respects)

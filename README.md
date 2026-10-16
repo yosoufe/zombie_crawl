@@ -443,13 +443,34 @@ python scripts/evaluate.py --num_envs 16 --checkpoint logs/rsl_rl/zombie_crawl/<
 python scripts/play.py --task Zombie-Crawl-SO100-v0 \
     --checkpoint logs/rsl_rl/zombie_crawl/<run>/model_600.pt --video --headless --num_envs 8
 # → <run>/videos/play/side_model_600_0000.mp4 and top_model_600_0000.mp4
+
+# Watch a checkpoint in the Isaac Sim GUI window:
+python scripts/play.py --task Zombie-Crawl-SO100-v0 \
+    --checkpoint logs/rsl_rl/zombie_crawl/<run>/model_600.pt --viz kit --num_envs 8
 ```
 
-- `--headless` runs without a GUI window. Isaac Lab 3.0 dropped `--headless` from the launcher CLI
-  (headless is the default when no visualizer is requested); this repo re-adds it as a compatibility
-  shim mapped to the launcher's `HEADLESS=1` env var, and keeps `--viz kit` working for the GUI.
+- **The GUI window requires `--viz kit` — omitting `--headless` is NOT enough.** Isaac Lab 3.0's
+  unified launcher runs headless BY DEFAULT; a visualizer must be explicitly requested
+  (`--viz kit` = Kit/Omniverse viewport; `--viz kit,newton_gl,...` combos exist). `--headless`
+  is a repo compatibility shim mapped to the launcher's `HEADLESS=1` env var (the 3.0 CLI
+  dropped the flag) — passing or omitting it makes no difference without `--viz`.
+  With `--headless --viz kit` the Kit visualizer runs window-less; `--viz none` disables all
+  visualizers (incompatible with `--video`, which otherwise auto-creates a HEADLESS recording
+  visualizer — add `--viz kit` alongside `--video` to record AND see the window).
+  Keep `--num_envs` small in GUI mode for viewport framerate.
 - Headless `--video` records from scene camera sensors, not the GUI viewport — see
   [docs/video_fix.md](docs/video_fix.md) for how it works and why the old viewport clips came out frozen.
+- `--dynamic_heading` enables the VARIABLE target direction during playback: the commanded
+  crawl heading is resampled uniformly mid-episode per env (every 6-12 s by default, staggered)
+  instead of staying frozen for the whole episode. Under the hood it appends the Hydra override
+  `env.use_dynamic_heading=true` and skips the deterministic one-heading-per-episode pin
+  (`video_flags.play_dynamic_heading`). See the shipped-checkpoint section below for examples.
+- `--disturbance` (alias `--disturbances`) re-enables the live external disturbance during
+  playback: `events.push_robot` keeps applying random force/torque wrenches to every rigid body
+  at full training strength (deterministic playback has no pushes). Red overlay arrows track the
+  applied force when `--viz kit` or `--video` is active. Scale it via Hydra, e.g.
+  `env.events.push_robot.params.force_range=[-20,20]`. Combine with `--dynamic_heading` for the
+  full robustness demo (pushes + jumping command direction).
 
 ### Play the shipped checkpoint (`checkpoints/model_1800.pt`)
 
@@ -464,8 +485,8 @@ not load inputs.)
 ```bash
 source scripts/env.sh
 
-# Watch it live (GUI):
-python scripts/play.py --task Zombie-Crawl-SO100-v0 --checkpoint checkpoints/model_1800.pt
+# Watch it live (GUI window; --viz kit is REQUIRED -- the 3.0 launcher is headless by default):
+python scripts/play.py --task Zombie-Crawl-SO100-v0 --checkpoint checkpoints/model_1800.pt --viz kit --num_envs 8
 
 # Record the 4K training-spec clip (4096 robots, full disturbance + 50% fallen starts,
 # ~40 s clip from the spawn moment):
@@ -473,6 +494,20 @@ python scripts/play.py --task Zombie-Crawl-SO100-v0 \
     --checkpoint checkpoints/model_1800.pt --video --headless
 # → checkpoints/videos/play/play_overview_*.mp4   (log dir follows the checkpoint's dir)
 # → checkpoints/exported/policy.pt + policy.onnx  (auto-exported JIT/ONNX of the loaded policy)
+
+# Play/record with the VARIABLE target direction (--dynamic_heading):
+python scripts/play.py --task Zombie-Crawl-SO100-v0 \
+    --checkpoint checkpoints/model_1800.pt --dynamic_heading --headless
+# Each robot's commanded crawl heading (the cyan overlay arrow) is redrawn +-180 deg
+# MID-EPISODE every `heading_resample_range` seconds (6-12 s default, uniform per env,
+# staggered), so the policy must continuously re-aim — exactly the behaviour the
+# `env.use_dynamic_heading=true` training mode unlocks at curriculum difficulty >= 0.75.
+# In play mode the curriculum is frozen, so the command gate counts as fully unlocked and
+# the resampling is live from the spawn moment. This is a play-side opt-in: DEFAULT
+# playback stays deterministic (one commanded heading per episode, like v0).
+# Combine freely with --video (variable-direction 4K training-spec clip) and --headless;
+# tune per-episode jump cadence with the Hydra override, e.g.
+#   ... --dynamic_heading env.heading_resample_range=[3,6]
 
 # Deterministic metrics (termination breakdown included — see the §3 note):
 python scripts/evaluate.py --num_envs 16 --checkpoint checkpoints/model_1800.pt

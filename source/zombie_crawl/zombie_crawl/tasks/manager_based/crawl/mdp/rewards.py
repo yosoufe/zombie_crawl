@@ -34,16 +34,44 @@ def _wrap_to_pi(x: torch.Tensor) -> torch.Tensor:
     return torch.atan2(torch.sin(x), torch.cos(x))
 
 
-def get_ref_dir(env: ManagerBasedEnv) -> tuple[torch.Tensor, torch.Tensor]:
-    """(cos, sin) of each env's commanded heading, drawn by ``reset_start_pose``.
+def crawl_heading_command(env: ManagerBasedEnv) -> torch.Tensor | None:
+    """Per-env commanded heading [rad] from the ``crawl_heading`` CommandManager term, or
+    ``None`` when the term is not active (``use_dynamic_heading`` off -> v0 frozen mode)."""
+    cm = getattr(env, "command_manager", None)
+    if cm is not None and "crawl_heading" in cm.active_terms:
+        return cm.get_command("crawl_heading")[:, 0]
+    return None
 
-    The command is uniform +-180 deg, INDEPENDENT of the spawn facing, frozen for the whole
-    episode. All directional rewards/curricula project world velocities onto it; the
-    ``heading_error_wrist`` observation shows the actor where the claw points relative to it.
-    It is a commanded direction, not a heading feedback loop -- it never moves to follow the
-    robot, so turning cannot farm it. Falls back to world +X before the first reset.
+
+def crawl_heading_resample_flag(env: ManagerBasedEnv) -> torch.Tensor | None:
+    """Bool mask (num_envs,) of envs whose commanded heading changed THIS step (mid-episode
+    resample or episode reset), or ``None`` when the command term is not active.
+
+    Stateful terms that accumulate displacement/velocity along the command axis must
+    re-anchor for these envs, otherwise two different axes get averaged together.
     """
-    yaw = getattr(env, "zombie_ref_yaw", None)
+    cm = getattr(env, "command_manager", None)
+    if cm is not None and "crawl_heading" in cm.active_terms:
+        return cm.get_term("crawl_heading").just_resampled
+    return None
+
+
+def get_ref_dir(env: ManagerBasedEnv) -> tuple[torch.Tensor, torch.Tensor]:
+    """(cos, sin) of each env's commanded heading.
+
+    The command is uniform +-180 deg, INDEPENDENT of the spawn facing. With
+    ``use_dynamic_heading`` off it is drawn once per episode by ``reset_start_pose``
+    (``env.zombie_ref_yaw``, frozen); with the flag on the ``crawl_heading`` command term
+    owns it and RESAMPLES it mid-episode per env (staggered every
+    ``heading_resample_range`` seconds). All directional rewards/curricula project world
+    velocities onto it; the ``heading_error_wrist`` observation shows the actor where the
+    claw points relative to it. It is a commanded direction, not a heading feedback loop --
+    it never moves to follow the robot, so turning cannot farm it. Falls back to world +X
+    before the first reset.
+    """
+    yaw = crawl_heading_command(env)
+    if yaw is None:
+        yaw = getattr(env, "zombie_ref_yaw", None)
     if yaw is None or yaw.shape[0] != env.num_envs:
         ones = torch.ones(env.num_envs, device=env.device)
         return ones, torch.zeros_like(ones)
@@ -208,6 +236,11 @@ def forward_progress_lpf(
         env.zombie_lp_x0 = x.clone()
     dx = x - env.zombie_lp_x0
     jump = dx.abs() > 3.0 * float(getattr(env.cfg, "v_target", 0.1)) * tau_s
+    # a mid-episode command resample (or episode reset) also invalidates the accumulated
+    # window: it was measured along the PREVIOUS command axis -> drop it for those envs
+    resampled = crawl_heading_resample_flag(env)
+    if resampled is not None:
+        jump = jump | resampled
     env.zombie_lp_dx = torch.where(jump, torch.zeros_like(dx), env.zombie_lp_dx + dx)
     env.zombie_lp_dt = torch.where(jump, torch.zeros_like(dx), env.zombie_lp_dt)
     env.zombie_lp_x0 = x.clone()
@@ -256,7 +289,11 @@ def wrist_pointing_error(
     fallback_yaw = yaw - 0.5 * math.pi
     valid = torch.hypot(dx, dy) > 0.01
     pointing_yaw = torch.where(valid, arrow_yaw, fallback_yaw)
-    ref = getattr(env, "zombie_ref_yaw", None)
+    # command source: live CommandManager term when dynamic heading is active, else the
+    # frozen per-episode draw from reset_start_pose (v0 behaviour)
+    ref = crawl_heading_command(env)
+    if ref is None:
+        ref = getattr(env, "zombie_ref_yaw", None)
     if ref is None or ref.shape[0] != pointing_yaw.shape[0]:
         ref = torch.zeros_like(pointing_yaw)
     return 1.0 - torch.cos(_wrap_to_pi(pointing_yaw - ref))

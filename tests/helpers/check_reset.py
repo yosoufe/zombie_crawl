@@ -54,7 +54,9 @@ for i in range(10):  # 10 rounds of resets
         ok = False
         break
 
+# print BEFORE Kit shutdown: simulation_app.close() can terminate the process before
+# buffered stdout survives when stdout is a pipe/file (pytest capture)
+print("[helper] OK" if ok else "[helper] FAILED", flush=True)
 env.close()
 simulation_app.close()
-print("[helper] OK" if ok else "[helper] FAILED")
 sys.exit(0 if ok else 1)

@@ -38,6 +38,56 @@ The only deviation from a training clip: recording starts at the spawn moment
 (clip step-offset = RTX warm-up only, no 200-iteration delay).
 """
 
+gui_overlay_enabled: bool = False
+"""When set by ``scripts/play.py`` / ``scripts/train.py`` (from ``--viz kit``), the env drives
+:class:`~...video_overlay.VectorArrowOverlay` (cyan commanded-direction + red per-body
+disturbance arrows, drawn as stage ``VisualizationMarkers``) on EVERY env step, so the arrows
+are visible in the live Kit GUI window even without ``--video``. While this flag is set the
+recorders delegate to the env's single overlay instance instead of creating their own, so a
+recording GUI run never double-draws (see :meth:`StreamingVideoRecorder._update_overlay`).
+"""
+
+play_disturbance_enabled: bool = False
+"""When set by ``scripts/play.py`` from ``--disturbance``, playback KEEPS the live external
+disturbance that deterministic ``play_mode()`` otherwise switches off:
+``events.push_robot`` (``mdp.disturb_all_bodies``) keeps applying random force/torque
+wrenches to every rigid body at full training strength. The red per-body arrows show the
+instantaneous force when the GUI/recorder overlay is active (``--viz kit`` or ``--video``).
+Default off -> playback stays deterministic (no pushes), exactly as before.
+"""
+
+play_dynamic_heading: bool = False
+"""When set by ``scripts/play.py`` from ``--dynamic_heading``, playback keeps the
+mid-episode resampled command heading ALIVE: the deterministic ``play_mode()`` path does
+NOT pin ``crawl_heading.resampling_time_range`` to one-episode-length, so every env gets
+a fresh +-180 deg crawl direction mid-episode (staggered every
+``heading_resample_range`` seconds) exactly like a unlocked training run. The script also
+appends the Hydra override ``env.use_dynamic_heading=true`` so the command term exists.
+Without this flag, playback stays deterministic (one heading per episode).
+"""
+
+def enable_gui_overlay_from_argv(argv: list[str]) -> bool:
+    """Set :data:`gui_overlay_enabled` when *argv* requests the Kit GUI visualizer.
+
+    Recognizes every launcher spelling of ``--viz kit`` (``--viz kit``, ``--viz=kit``,
+    comma combos like ``--viz kit,rerun``). Returns the resulting flag.
+    """
+    global gui_overlay_enabled
+    values: list[str] = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--viz" and i + 1 < len(argv):
+            values += argv[i + 1].split(",")
+            i += 2
+            continue
+        if arg.startswith("--viz="):
+            values += arg.split("=", 1)[1].split(",")
+        i += 1
+    gui_overlay_enabled = any(v.strip() == "kit" for v in values)
+    return gui_overlay_enabled
+
+
 training_video_start_iters: int | None = None
 """When set by ``scripts/train.py`` from ``--video_start_iters N``, overrides
 ``CrawlEnvCfg.training_video_start_iters`` (the PPO iteration at which the first clip is

@@ -154,7 +154,10 @@ class CrawlSceneCfg(InteractiveSceneCfg):
 
 @configclass
 class CrawlCommandsCfg:
-    """Velocity command term -- only active when ``use_velocity_commands`` is set (phase 2 stub)."""
+    """Command terms -- ``base_velocity`` only when ``use_velocity_commands`` (phase 2 stub),
+    ``crawl_heading`` only when ``use_dynamic_heading`` (mid-episode resampled direction)."""
+
+    crawl_heading: mdp.UniformCrawlHeadingCommandCfg = None
 
     base_velocity = mdp.UniformVelocityCommandCfg(
         asset_name="robot",
@@ -325,9 +328,12 @@ class CrawlEventsCfg:
             "joint_noise": 0.1,
             "xy_offset": 0.05,
             # +-pi/2 instead of +-pi: a 180-degree turn-off is too costly early in training
-            # uniform facing: rewards/curriculum score motion along the frozen SPAWN heading
-            # (mdp.reset_start_pose records it), so the task is rotationally symmetric and
-            # needs no world-+X reference the policy cannot observe
+            # uniform facing: with use_dynamic_heading OFF, rewards/curriculum score motion
+            # along the frozen command heading (mdp.reset_start_pose records it on
+            # env.zombie_ref_yaw), so the task is rotationally symmetric and needs no world-+X
+            # reference the policy cannot observe. With the flag ON, the crawl_heading command
+            # term owns the direction (mdp.get_ref_dir) and resamples it mid-episode; this
+            # draw only randomizes the SPAWN facing, not the command.
             "yaw_range": (-math.pi, math.pi),
         },
     )
@@ -454,6 +460,29 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
     """Enable the v_target + friction curriculum."""
     use_velocity_commands: bool = False
     """Phase-2 stub: track commanded (vx, vy, yaw_rate) instead of a fixed v_target."""
+    use_dynamic_heading: bool = False
+    """Resample the commanded crawl heading MID-EPISODE instead of freezing it per episode.
+
+    Off (default): today's v0 behaviour — the direction is drawn once per episode by
+    ``mdp.reset_start_pose`` (``env.zombie_ref_yaw``) and stays frozen.
+    On: a ``mdp.UniformCrawlHeadingCommand`` command term owns the direction; every env
+    independently keeps its heading for ``heading_resample_range`` seconds (uniform draw),
+    then gets a fresh +-180 deg target mid-episode. All directional terms (rewards, stall
+    gate, curriculum gates, the cyan video arrow) follow via ``mdp.get_ref_dir``, and the
+    stateful ones (progress LPF, stall anchor, velocity EMA) re-anchor on resample.
+    Enable with Hydra: ``env.use_dynamic_heading=true``; mid-episode jumps unlock at
+    ``env.heading_curriculum_frac`` of curriculum difficulty (see that field).
+    """
+    heading_resample_range: tuple[float, float] = (6.0, 12.0)
+    """Seconds each commanded heading is held before a fresh draw (uniform per env, staggered
+    by the CommandManager). ~2 command changes per 20 s episode at the defaults."""
+    heading_range: tuple[float, float] = (-math.pi, math.pi)
+    """Uniform range [rad] the commanded heading is drawn from."""
+    heading_curriculum_frac: float = 0.75
+    """Global-curriculum difficulty at which mid-episode heading resampling unlocks (0 disables
+    the gate). Staggered AFTER the difficulty curriculum's channels (fallen spawns [0, 0.5],
+    pushes [0.5, 1]): the command only starts jumping once the policy already crawls reliably
+    under disturbances. Below the gate the heading stays frozen per episode (v0 behaviour)."""
     use_gait_clock: bool = False
     """Append a sinusoidal gait-phase clock to the actor observations."""
     num_envs: int = 2048
@@ -541,6 +570,10 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
         else:
             self.commands = None
 
+        # optional: mid-episode resampled commanded heading (CommandManager-native;
+        # mdp.get_ref_dir prefers this term over the frozen reset_start_pose draw)
+        self._ensure_crawl_heading_term()
+
         # optional: gait clock (set to None so the obs manager skips it; the group
         # iterates instance __dict__ and ignores None terms)
         if not self.use_gait_clock:
@@ -565,6 +598,27 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
         if self.record_training_video or video_flags.training_video_enabled or video_flags.play_video_training_spec:
             self.record_training_video = True
             self._setup_training_video()
+
+    def _ensure_crawl_heading_term(self) -> None:
+        """Idempotently wire the ``crawl_heading`` command term from ``use_dynamic_heading``.
+
+        The Hydra composition path (``update_from_dict``) writes ``use_dynamic_heading=true``
+        onto an ALREADY-constructed cfg and never re-runs ``__post_init__``, so the env
+        entry points (``CrawlRLEnv``/``CrawlPlayRLEnv``) and ``play_mode`` call this again
+        right before the config is consumed.
+        """
+        if not getattr(self, "use_dynamic_heading", False):
+            return
+        if self.commands is not None and getattr(self.commands, "crawl_heading", None) is not None:
+            return
+        if self.commands is None:
+            self.commands = CrawlCommandsCfg(base_velocity=None)
+        self.commands.crawl_heading = mdp.UniformCrawlHeadingCommandCfg(
+            resampling_time_range=self.heading_resample_range,
+            heading_range=self.heading_range,
+            curriculum_gate_frac=self.heading_curriculum_frac,
+            debug_vis=False,
+        )
 
     @staticmethod
     def _look_at_pose(
@@ -760,6 +814,9 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
         clip matches a training overview video (see
         :attr:`zombie_crawl.tasks.manager_based.crawl.video_flags.play_video_training_spec`).
         """
+        # wire the command term BEFORE pinning (Hydra may have set use_dynamic_heading
+        # post-construction, and play_mode is the last hook before the cfg is consumed)
+        self._ensure_crawl_heading_term()
         super().play_mode()
         # no curriculum: constant v_target at its final value
         self.curriculum.v_target = None
@@ -781,8 +838,22 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
         self.events.reset_start_pose.params["joint_noise"] = 0.0
         self.events.reset_start_pose.params["xy_offset"] = 0.0
         self.events.reset_start_pose.params["yaw_range"] = (0.0, 0.0)
-        # deterministic eval: no live disturbance
-        self.events.push_robot = None
+        # deterministic eval: no live disturbance (scripts/play.py --disturbance opts back
+        # in at full training strength; red overlay arrows then track the applied wrenches)
+        if not video_flags.play_disturbance_enabled:
+            self.events.push_robot = None
+        # deterministic eval: one commanded heading per episode (no mid-episode resample;
+        # the CommandManager still redraws it per episode, like the frozen ref_yaw draw).
+        # scripts/play.py --dynamic_heading opts back into live mid-episode resampling
+        # (the curriculum gate reads no difficulty in play mode -> always unlocked).
+        if not video_flags.play_dynamic_heading:
+            self._pin_heading_resampling()
+
+    def _pin_heading_resampling(self) -> None:
+        """Hold each commanded heading for a full episode (deterministic eval/playback)."""
+        if self.commands is not None and getattr(self.commands, "crawl_heading", None) is not None:
+            t = self.episode_length_s
+            self.commands.crawl_heading.resampling_time_range = (t, t)
 
 
 @configclass
@@ -820,12 +891,19 @@ class CrawlPlayEnvCfg(CrawlEnvCfg):
         self.events.reset_start_pose.params["joint_noise"] = 0.0
         self.events.reset_start_pose.params["xy_offset"] = 0.0
         self.events.reset_start_pose.params["yaw_range"] = (0.0, 0.0)
-        # deterministic eval: no live disturbance
-        self.events.push_robot = None
+        # deterministic eval: no live disturbance (--disturbance opts back in, see play_mode)
+        if not video_flags.play_disturbance_enabled:
+            self.events.push_robot = None
+        # deterministic eval: one commanded heading per episode
+        self._pin_heading_resampling()
         # remove observation corruption
         self.observations.policy.enable_corruption = False
 
     def play_mode(self):
         # deterministic by construction; the training-spec variant was configured in
-        # __post_init__ (video_flags.play_video_training_spec), nothing left to change
-        return
+        # __post_init__ (video_flags.play_video_training_spec). Still wire + pin the
+        # heading term for the Hydra path (flags set after __post_init__ already ran).
+        # scripts/play.py --dynamic_heading keeps the mid-episode resampling alive.
+        self._ensure_crawl_heading_term()
+        if not (video_flags.play_video_training_spec or video_flags.play_dynamic_heading):
+            self._pin_heading_resampling()

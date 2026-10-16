@@ -26,6 +26,8 @@ being a single camera (no per-env tiling, no OOM at large num_envs).
 
 from isaaclab.envs import ManagerBasedRLEnv
 
+from . import video_flags
+
 # Stream training/play video frames straight to ffmpeg instead of buffering gigabytes in RAM.
 # manager_based_env instantiates the module-global ``VideoRecorder``, so swapping the symbol
 # here (this module loads at gym.make time, after the app is up) makes every recorder use
@@ -40,6 +42,11 @@ class CrawlRLEnv(ManagerBasedRLEnv):
     """Crawl env that keeps the headless training-video viewer rendering fresh frames."""
 
     def __init__(self, cfg, render_mode=None, **kwargs):
+        # the Hydra composition path can set cfg.use_dynamic_heading AFTER __post_init__
+        # ran, so wire the crawl_heading command term here too (idempotent)
+        ensure = getattr(cfg, "_ensure_crawl_heading_term", None)
+        if ensure is not None:
+            ensure()
         super().__init__(cfg, render_mode, **kwargs)
         if getattr(cfg, "record_training_video", False):
             # A Camera sensor sets these in Camera._initialize_impl; the world-space
@@ -47,6 +54,41 @@ class CrawlRLEnv(ManagerBasedRLEnv):
             # re-rendering each step (fresh, non-static video frames).
             self.sim.set_setting("/isaaclab/render/rtx_sensors", True)
             self.sim.set_setting("/physics/fabricUpdateTransformations", True)
+        # GUI arrow overlay (scripts set this flag when --viz kit is requested): stage
+        # markers updated every step, so the cyan/red arrows are visible in the live
+        # Kit window even without --video; recorders delegate to this single instance.
+        self._gui_overlay = None
+        self._gui_overlay_failed = False
+
+    def step(self, action):
+        out = super().step(action)
+        if video_flags.gui_overlay_enabled and not self._gui_overlay_failed:
+            self._update_gui_overlay()
+        return out
+
+    def _update_gui_overlay(self):
+        """Lazily create and per-step refresh the VectorArrowOverlay (cyan/red arrows)."""
+        if self._gui_overlay_failed:
+            return
+        try:
+            if self._gui_overlay is None:
+                from .video_overlay import VectorArrowOverlay
+
+                overlay = VectorArrowOverlay(self)
+                if not overlay.setup():
+                    self._gui_overlay_failed = True
+                    return
+                self._gui_overlay = overlay
+            self._gui_overlay.update()
+        except Exception:
+            import logging
+            import traceback
+
+            logging.getLogger(__name__).warning(
+                "[CrawlRLEnv] GUI arrow overlay disabled after error. %s",
+                traceback.format_exc(),
+            )
+            self._gui_overlay, self._gui_overlay_failed = None, True
 
 
 class CrawlPlayRLEnv(CrawlRLEnv):

@@ -135,6 +135,16 @@ class StreamingVideoRecorder(VideoRecorder):
         """Draw the commanded-direction (cyan) arrow overlay on the stage."""
         if not self._overlay_enabled or self._overlay_failed:
             return
+        # GUI overlay mode (scripts --viz kit): the ENV owns the single overlay instance and
+        # refreshes it every step; delegate instead of building a second PointInstancer
+        # (double-drawn identical arrows / z-fighting in the clip).
+        from . import video_flags
+
+        if video_flags.gui_overlay_enabled:
+            env_update = getattr(self._env, "_update_gui_overlay", None)
+            if env_update is not None:
+                env_update()
+                return
         try:
             if self._overlay is None:
                 from .video_overlay import VectorArrowOverlay

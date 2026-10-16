@@ -43,7 +43,7 @@ def run_script(args: list[str], timeout: int = 1800) -> subprocess.CompletedProc
 
 @pytest.fixture(scope="module")
 def venv_python():
-    if "env_isaaclab" not in sys.executable and "zombie_crawl" not in sys.executable:
+    if "env_isaaclab" not in sys.executable and "zombie_crawl" not in sys.executable and "/.venv/" not in sys.executable:
         pytest.fail(f"Run pytest from the project venv, got interpreter: {sys.executable}")
     return sys.executable
 
@@ -72,7 +72,9 @@ def test_obs_action_dimensions(venv_python):
         m = re.match(r"(obs_group \w+|action_dim) (\d+)", line)
         if m:
             dims[m.group(1)] = int(m.group(2))
-    assert dims.get("obs_group policy") == 25, f"unexpected policy obs dim: {dims}"
+    # 26 = projected_gravity(3) + heading_err(2) + base_ang_vel(3) + joint_pos(6)
+    #      + joint_vel(6) + last_action(6); gait_clock term is None by default
+    assert dims.get("obs_group policy") == 26, f"unexpected policy obs dim: {dims}"
     assert dims.get("obs_group critic") == 5, f"unexpected critic (privileged) obs dim: {dims}"
     assert dims.get("action_dim") == 6, f"unexpected action dim: {dims}"
 
@@ -134,10 +136,58 @@ def test_play_loads_checkpoint(venv_python):
             "1",
             "--checkpoint",
             str(checkpoints[0]),
-            "--max-steps",
+            # Isaac Lab 3.0's rsl_rl play CLI has no --max-steps; playback self-terminates
+            # once every recorder finishes its first clip -> record a tiny 100-step clip
+            "--video",
+            "--video_length",
             "100",
+            "env.training_video_width=320",
+            "env.training_video_height=180",
             "--headless",
         ],
         timeout=1800,
     )
     assert proc.returncode == 0, f"play failed:\n{proc.stdout[-4000:]}\n{proc.stderr[-4000:]}"
+
+
+# ---------------------------------------------------------------- test 6: dynamic heading
+
+
+def test_dynamic_heading_training_smoke(venv_python):
+    """A short run with env.use_dynamic_heading=true boots the crawl_heading command term,
+    trains without NaNs, and reports the term on the Command Manager banner."""
+    proc = run_script(
+        [
+            str(SCRIPTS / "train.py"),
+            "--task",
+            "Zombie-Crawl-SO100-v0",
+            "env.use_dynamic_heading=true",
+            "env.heading_resample_range=[4,8]",
+            "--num_envs",
+            "32",
+            "--max_iterations",
+            "3",
+            "--headless",
+            "--seed",
+            "0",
+            "--experiment_name",
+            "smoke_test_dynhead",
+            "--run_name",
+            "pytest",
+        ],
+        timeout=2400,
+    )
+    assert proc.returncode == 0, f"train failed:\n{proc.stdout[-4000:]}\n{proc.stderr[-4000:]}"
+    assert "UniformCrawlHeadingCommand" in proc.stdout, "command term not instantiated"
+    log_dir = REPO_ROOT / "logs" / "rsl_rl" / "smoke_test_dynhead"
+    assert list(log_dir.rglob("model_*.pt")), f"no checkpoint under {log_dir}"
+    # curriculum gate: 3 iterations cannot reach difficulty 0.75 -> resampling must still
+    # be locked (frozen per-episode heading, v0 behaviour) -- gate_open == 0 in TensorBoard
+    from tensorboard.backend.event_processing import event_accumulator
+
+    tfe = sorted(log_dir.rglob("events.out.tfevents.*"))[-1]
+    ea = event_accumulator.EventAccumulator(str(tfe), size_guidance={"scalars": 0})
+    ea.Reload()
+    tag = "Metrics/crawl_heading/gate_open"
+    assert tag in ea.Tags()["scalars"], f"missing {tag} (term metrics not logged)"
+    assert all(s.value == 0.0 for s in ea.Scalars(tag)), "gate opened during early training!"

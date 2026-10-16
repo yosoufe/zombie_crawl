@@ -142,16 +142,25 @@ class VectorArrowOverlay:
         pos = robot.data.root_pos_w.torch[ids]
         n = ids.shape[0]
         dev = pos.device
-        ref = getattr(env, "zombie_ref_yaw", None)
+        # command source shared with the rewards/obs (mdp.get_ref_dir): frozen zombie_ref_yaw
+        # in v0 mode, or the live crawl_heading command term (arrow JUMPS mid-episode when
+        # the target rotates with use_dynamic_heading)
+        from .mdp.rewards import get_ref_dir
+
+        cos_full, sin_full = get_ref_dir(env)
         total = robot.data.root_pos_w.torch.shape[0]
-        ref_i = ref[ids] if ref is not None and ref.shape[0] == total else torch.zeros(n, device=dev)
+        if cos_full.shape[0] == total:
+            ref_cos, ref_sin = cos_full[ids], sin_full[ids]
+        else:
+            ref_cos = torch.ones(n, device=dev)
+            ref_sin = torch.zeros(n, device=dev)
 
         # arrow: fixed length, cone apex (local +Z) aimed along the commanded heading.
         l = torch.full((n,), self._length, device=dev)
-        q = self._quat_z_to_dir(ref_i)
+        q = self._quat_z_to_dir(torch.atan2(ref_sin, ref_cos))
         # center the cone half the arrow out from the base so the tip lands one length away
         t = pos + torch.stack(
-            [0.5 * l * torch.cos(ref_i), 0.5 * l * torch.sin(ref_i), torch.full((n,), self._lift, device=dev)],
+            [0.5 * l * ref_cos, 0.5 * l * ref_sin, torch.full((n,), self._lift, device=dev)],
             dim=-1,
         )
         self._cmd.visualize(
