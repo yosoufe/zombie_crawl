@@ -15,7 +15,7 @@ The PD gains passed here only seed the USD joint drives; the runtime gains come 
 the actuator preset configured in ``zombie_crawl.assets.SoArm100Cfg``.
 
 Usage:
-    python scripts/convert_asset.py [--force]
+    python scripts/asset_pipeline/convert_asset.py [--force]
 """
 
 import argparse
@@ -26,8 +26,10 @@ from isaaclab.app import AppLauncher
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Convert the prepared SO-ARM100 URDF to USD.")
-HERE = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.dirname(HERE)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from so100_source import repo_root  # noqa: E402
+
+REPO_ROOT = repo_root()
 parser.add_argument(
     "--input",
     type=str,

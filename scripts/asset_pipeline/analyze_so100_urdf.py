@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Analyze SO-ARM100 (SO-100) URDF: joints, links, meshes, mass, reach, PhysX flags."""
+"""Analyze SO-ARM100 (SO-100) URDF: joints, links, meshes, mass, reach, PhysX flags.
+
+The stock URDF is read from the SO-ARM100 upstream clone (``SO_ARM100_DIR`` env var,
+else ``<repo>/../third_party/SO-ARM100``; see so100_source.py).
+"""
 import math
 import os
 import struct
@@ -8,9 +12,12 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 
-REPO = "/home/yousof/robotics/experimental/third_party/SO-ARM100"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from so100_source import require_so100  # noqa: E402
+
+REPO = require_so100()
 URDF = os.path.join(REPO, "Simulation/SO100/so100.urdf")
-REL = "/home/yousof/robotics/experimental"
+REL = os.path.dirname(os.path.dirname(REPO))
 
 
 def rel(p):

@@ -1,6 +1,6 @@
 # Zombie Crawl — Progress & Installation Report
 
-Working directory: `/home/yousof/robotics/experimental`
+Working directory: `<workspace>`
 Last updated: 2026-10-03 (session)
 
 This file is a living report. It records (a) what has been done so far, (b) every
@@ -42,27 +42,31 @@ line 29), and smoke tests.
 ### 3.1 Tooling (host)
 | Software | Version | Location |
 |----------|---------|----------|
-| `uv` (system) | 0.8.4 | `/home/yousof/.local/bin/uv` — **incompatible with Isaac Lab 3.0** (can't parse `[tool.uv.extra-build-variables]`; drops `[tool.uv]` so `prerelease="allow"` is ignored). Kept only as fallback. |
-| `uv` (local, fallback) | 0.12.22 | `/home/yousof/robotics/experimental/.tools/uv` |
-| Miniconda | 26.1.1 | `/home/yousof/software/miniconda3` (base Python 3.13.5; used only to **create** the project env) |
+| `uv` (system) | 0.8.4 | `~/.local/bin/uv` — **incompatible with Isaac Lab 3.0** (can't parse `[tool.uv.extra-build-variables]`; drops `[tool.uv]` so `prerelease="allow"` is ignored). Kept only as fallback. |
+| `uv` (local, fallback) | 0.12.22 | `<workspace>/.tools/uv` |
+| Miniconda | 26.1.1 | `<miniconda3>` (base Python 3.13.5; used only to **create** the project env) |
 
 ### 3.2 Source checkouts (git)
 | Repo | Ref | Location |
 |------|-----|----------|
-| NVIDIA Isaac Lab | branch `release/3.0.0`, commit `ad728bdac` = `v3.0.0-EA-208-gad728bdac` | `/home/yousof/robotics/experimental/IsaacLab3` (plain clone) |
-| SO-ARM100 (LeRobot) | commit `5f6d2b8` | `/home/yousof/robotics/experimental/third_party/SO-ARM100` |
+| NVIDIA Isaac Lab | branch `release/3.0.0`, commit `ad728bdac` = `v3.0.0-EA-208-gad728bdac` | `<workspace>/IsaacLab3` (plain clone) |
+| SO-ARM100 (LeRobot) | commit `5f6d2b8` | `<workspace>/third_party/SO-ARM100` |
 
-Note: no published `isaaclab` 3.0 wheel exists on pypi.nvidia.com (404) — Isaac Lab
-must be installed from the source checkout via its CLI installer (equivalent of
-`./isaaclab.sh --install`).
+Note: for fresh setups do **not** follow this section — use the README "Setup" flow
+(plain pip/conda, no Isaac Lab source checkout needed):
+`pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu130` then
+`pip install isaaclab[isaacsim,all]==2.3.2.post1 --extra-index-url https://pypi.nvidia.com`.
+Official docs: <https://docs.isaacsim.omniverse.nvidia.com/6.2.0/installation/install_python.html>
+(Isaac Sim), <https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/isaaclab_pip_installation.html>
+(Isaac Lab).
 
 ### 3.3 Python virtual environment (active)
 | Item | Detail |
 |------|--------|
-| Env path | `/home/yousof/robotics/experimental/.venv` (**conda prefix env**, ~24 GB) |
+| Env path | `<workspace>/.venv` (**conda prefix env**, ~24 GB) |
 | Python | 3.12.15 (required by Isaac Sim 6.1) |
-| Created | `conda create -y -p /home/yousof/robotics/experimental/.venv python=3.12 pip` |
-| Activate | No `bin/activate`; use: `export CONDA_PREFIX=/home/yousof/robotics/experimental/.venv; export PATH="$CONDA_PREFIX/bin:$PATH"` |
+| Created | `conda create -y -p <workspace>/.venv python=3.12 pip` |
+| Activate | No `bin/activate`; use: `export CONDA_PREFIX=<workspace>/.venv; export PATH="$CONDA_PREFIX/bin:$PATH"` |
 | Why conda, not venv | The PATH `python3.12` is a uv-managed build with `sys.base_prefix=/install` → `python3.12 -m venv` produces a broken venv (`ModuleNotFoundError: No module named 'encodings'`). No `/usr/bin/python3.12`. |
 
 ### 3.4 Packages installed in `.venv` (active stack)
@@ -101,9 +105,9 @@ must be installed from the source checkout via its CLI installer (equivalent of
 | Item | Location |
 |------|----------|
 | Isaac Sim EULA acceptance (persistent) | `~/.local/share/ov/...`; **all non-interactive runs must still set `OMNI_KIT_ACCEPT_EULA=YES`** |
-| uv / pip caches (redirected to keep the tree clean) | `/home/yousof/robotics/experimental/.cache/uv`, `/home/yousof/robotics/experimental/.cache/pip` |
-| **All install/verify logs (user rule: local folder only)** | `/home/yousof/robotics/experimental/.install/` — incl. `pip-isaaclab3-*.log` (Isaac Sim 6.1), `isaaclab3-install-*.log` (Lab 3.0 submodules + rsl-rl), `torch-downgrade-*.log`, `verify-create_empty-*.log`, `verify-ant-train-*.log`, `headless_check.py` + `headless-check.log` |
-| Clean libxml2 2.12.10 (M2 workaround, still needed in 6.1) | `/home/yousof/robotics/experimental/.libxml2/` (use via `LD_LIBRARY_PATH=.../.libxml2/lib`) |
+| uv / pip caches (redirected to keep the tree clean) | `<workspace>/.cache/uv`, `<workspace>/.cache/pip` |
+| **All install/verify logs (user rule: local folder only)** | `<workspace>/.install/` — incl. `pip-isaaclab3-*.log` (Isaac Sim 6.1), `isaaclab3-install-*.log` (Lab 3.0 submodules + rsl-rl), `torch-downgrade-*.log`, `verify-create_empty-*.log`, `verify-ant-train-*.log`, `headless_check.py` + `headless-check.log` |
+| Clean libxml2 2.12.10 (M2 workaround, still needed in 6.1) | `<workspace>/.libxml2/` (use via `LD_LIBRARY_PATH=.../.libxml2/lib`) |
 
 ### 3.6 GPU / driver (pre-existing, verified)
 | Item | Detail |
@@ -223,7 +227,7 @@ full PPO training run both succeeded, see §4). Remaining 26.04-specific workaro
 
 1. **libxml2** — `omni.kit.asset_converter` / URDF asset importer fail to import
    (`libxml2.so.2` missing; 26.04 ships only `.so.16`). Use
-   `LD_LIBRARY_PATH=/home/yousof/robotics/experimental/.libxml2/lib` for M2
+   `LD_LIBRARY_PATH=<workspace>/.libxml2/lib` for M2
    (URDF→USD).
 2. **EULA** — every non-interactive run needs `OMNI_KIT_ACCEPT_EULA=YES`.
 3. `zombie_crawl/scripts/env.sh` needs updating for the `.venv` activation (conda
@@ -240,7 +244,7 @@ fix in §7.3.
 ### Clean libxml2 build (this session)
 - Source: libxml2 **2.12.10** (gnome.org), built with system gcc 15.2, `--without-iconv`,
   **no ICU** (conda's libxml2 pulled ICU73 + conda libstdc++ → heap crash; rejected).
-- Installed to: `/home/yousof/robotics/experimental/.libxml2/` (prefix).
+- Installed to: `<workspace>/.libxml2/` (prefix).
 - Runtime deps: only system `libz`/`libm`/`libc` (verified via `ldd`).
 - Build tree (scratch): `/tmp/opencode/libxml2-2.12.10/`.
 
@@ -255,8 +259,8 @@ forces headless **unless** `--viz kit` is passed (`kit_launcher.py`:
 "Running headless because '--viz kit' was not requested.").
 
 ```bash
-cd /home/yousof/robotics/experimental/IsaacLab3
-export CONDA_PREFIX=/home/yousof/robotics/experimental/.venv
+cd <workspace>/IsaacLab3
+export CONDA_PREFIX=<workspace>/.venv
 export PATH="$CONDA_PREFIX/bin:$PATH"
 export OMNI_KIT_ACCEPT_EULA=YES
 export HEADLESS=0
@@ -270,8 +274,8 @@ python scripts/reinforcement_learning/train.py --rl_library rsl_rl --task Isaac-
 ### 6.2 Headless training (no window, for the real run)
 
 ```bash
-cd /home/yousof/robotics/experimental/IsaacLab3
-export CONDA_PREFIX=/home/yousof/robotics/experimental/.venv
+cd <workspace>/IsaacLab3
+export CONDA_PREFIX=<workspace>/.venv
 export PATH="$CONDA_PREFIX/bin:$PATH"
 export OMNI_KIT_ACCEPT_EULA=YES
 export HEADLESS=1
@@ -285,7 +289,7 @@ camera** of the whole scene (several robots visible at once) — **not** a per-e
 camera, which OOMs at 4096 envs.
 
 ```bash
-cd /home/yousof/robotics/experimental/zombie_crawl
+cd <workspace>/zombie_crawl
 source scripts/env.sh                       # .venv + OMNI_KIT_ACCEPT_EULA + libxml2
 HEADLESS=1 python scripts/train.py \
     --task Zombie-Crawl-SO100-v0 \
@@ -335,7 +339,7 @@ raw -1 / raw +1 endpoints per joint, with the hard limits and default pose for
 reference:
 
 ```bash
-cd /home/yousof/robotics/experimental/zombie_crawl
+cd <workspace>/zombie_crawl
 source scripts/env.sh                       # .venv + OMNI_KIT_ACCEPT_EULA + libxml2
 python scripts/print_action_limits.py [--preset servo]
 ```

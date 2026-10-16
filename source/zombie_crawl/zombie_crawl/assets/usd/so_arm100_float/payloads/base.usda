@@ -4,7 +4,7 @@
         string creator = "URDF USD Converter v0.3.2"
     }
     defaultPrim = "so_arm100"
-    doc = """Generated from Composed Stage of root layer /home/yousof/robotics/experimental/zombie_crawl/source/zombie_crawl/zombie_crawl/assets/usd/so_arm100_float/payloads/base.usd
+    doc = """Generated from Composed Stage of root layer payloads/base.usd
 """
     endTimeCode = 1000000
     kilogramsPerUnit = 1

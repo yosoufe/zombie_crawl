@@ -256,6 +256,96 @@ range (now limits-relative, §2).
 
 ---
 
+## Setup
+
+### Requirements
+
+| Need | Detail |
+|------|--------|
+| OS | Linux x86_64 (developed/tested on Ubuntu 26.04) |
+| GPU | NVIDIA RTX GPU (tested: RTX 5090 / Blackwell) with a current driver (CUDA 13.x driver stack) |
+| Disk | ~30 GB free (Python env ≈ 24 GB + Isaac Sim pip packages ≈ 6 GB) |
+| Tools | git, conda (Miniconda is fine), `ffmpeg` on PATH (the video recorder streams raw frames into it) |
+
+Isaac Sim pins **Python 3.12** — let conda provide it; don't rely on the distro python.
+
+Below, `<repo>` is your clone of this repository.
+
+### 1. Create the env and install Isaac Lab + Isaac Sim (all via pip/conda)
+
+From the repo root — the env lives at `<repo>/../.venv` (a plain `python3.12 -m venv`
+off a uv-managed interpreter is broken on this stack, hence conda):
+
+```bash
+cd <repo>
+conda create --prefix ../.venv python=3.12
+conda activate "$(realpath ../.venv)"
+pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu130
+pip install isaaclab[isaacsim,all]==2.3.2.post1 --extra-index-url https://pypi.nvidia.com
+```
+
+Official install docs (for other install methods / troubleshooting):
+[Isaac Sim pip installation](https://docs.isaacsim.omniverse.nvidia.com/6.2.0/installation/install_python.html) ·
+[Isaac Lab pip installation](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/isaaclab_pip_installation.html)
+
+### 2. Install the zombie_crawl package
+
+```bash
+pip install -e source/zombie_crawl
+```
+
+### 3. Per-shell environment
+
+```bash
+source scripts/env.sh
+```
+
+It activates the project env (`$ZOMBIE_CRAWL_ENV` > `<repo>/.venv` > `<repo>/../.venv`,
+overriding e.g. your auto-activated conda base), exports `OMNI_KIT_ACCEPT_EULA=YES`
+(mandatory for every headless/background Kit run), and prepends libxml2 to
+`LD_LIBRARY_PATH` if it is present (step 4; not needed for training/play/eval). If your
+env lives elsewhere, export `ZOMBIE_CRAWL_ENV` pointing at it before sourcing.
+
+### 4. Optional: clean libxml2 (URDF conversion only)
+
+The Isaac Sim URDF importer links `libxml2.so.2`, which Ubuntu 26.04 no longer ships
+(only `.so.16`). Needed only when re-running the asset pipeline
+(`scripts/asset_pipeline/convert_asset.py`). Build a minimal libxml2 2.12.10 (source
+from gnome.org) — **no ICU** (conda's libxml2 pulls ICU73 + its own libstdc++ and heap
+crashes) and **no iconv**:
+
+```bash
+./configure --prefix="<repo>/.libxml2" --without-python --without-iconv
+make -j"$(nproc)" && make install
+```
+
+`env.sh` picks it up at `<repo>/.libxml2/lib` (or point `ZOMBIE_CRAWL_LIBXML2` at the
+prefix). Only runtime deps: system `libc`/`libm`/`libz`.
+
+### 5. Optional: SO-ARM100 upstream clone (asset pipeline only)
+
+The converted URDF/USD are committed under
+`source/zombie_crawl/zombie_crawl/assets/`, so this is only needed to re-run
+`scripts/asset_pipeline/` (URDF prep + analysis + USD conversion):
+
+```bash
+git clone https://github.com/TheRobotStudio/SO-ARM100.git <repo>/../third_party/SO-ARM100
+# or point SO_ARM100_DIR at an existing clone
+```
+
+### First-run sanity check
+
+```bash
+python scripts/train.py --task Zombie-Crawl-SO100-v0 --num_envs 8 --max_iterations 1 --headless
+```
+
+First boot unpacks Kit caches and takes a few minutes; a completed PPO iteration with no
+traceback means the stack is good. (Headless `import isaaclab_tasks` failing with
+`No module named 'pxr'` in a *bare* shell is expected — `pxr` only exists inside the
+running Isaac Sim app.)
+
+---
+
 ## Run
 
 ```bash
@@ -275,8 +365,11 @@ does **not** start until `training_video_start_iters` (default **200**) — so f
 low start:
 
 ```bash
-python scripts/train.py --task Zombie-Crawl-SO100-v0 \
-    --num_envs 64 --max_iterations 60 --video --video_start_iters 1 --headless
+python scripts/train.py \
+  --task Zombie-Crawl-SO100-v0 \
+  --num_envs 64 --max_iterations 30 \
+  --video --video_start_iters 10 \ # don't use less than 10, the video won't be created properly
+  --headless
 # → logs/rsl_rl/zombie_crawl/<timestamp>/videos/train/train_overview_*.mp4 (4K)
 ```
 

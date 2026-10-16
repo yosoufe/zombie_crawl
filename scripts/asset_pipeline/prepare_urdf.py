@@ -16,8 +16,11 @@ Fixes applied to the stock ``so100.urdf`` (see docs/so_arm100_urdf_analysis.md):
    ``Fixed_Jaw.stl`` / ``Moving_Jaw.stl`` meshes so the (actuated) gripper can interact
    with the ground.
 
+The stock URDF is read from the SO-ARM100 upstream clone (``SO_ARM100_DIR`` env var,
+else ``<repo>/../third_party/SO-ARM100``; see so100_source.py).
+
 Usage:
-    python scripts/prepare_urdf.py [--base-mass 0.15] [--base-fill 0.5]
+    python scripts/asset_pipeline/prepare_urdf.py [--base-mass 0.15] [--base-fill 0.5]
 """
 
 import argparse
@@ -27,13 +30,15 @@ import struct
 import sys
 import xml.etree.ElementTree as ET
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from so100_source import repo_root, require_so100, so100_dir  # noqa: E402
+
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.dirname(HERE)
-DEFAULT_INPUT = os.path.join(
-    REPO_ROOT, "..", "third_party", "SO-ARM100", "Simulation", "SO100", "so100.urdf"
-)
+REPO_ROOT = repo_root()
+SO100 = so100_dir()
+DEFAULT_INPUT = os.path.join(SO100, "Simulation", "SO100", "so100.urdf")
 # the URDF references meshes as "assets/*.stl" relative to the URDF's own directory
-DEFAULT_MESH_DIR = os.path.join(REPO_ROOT, "..", "third_party", "SO-ARM100", "Simulation", "SO100")
+DEFAULT_MESH_DIR = os.path.join(SO100, "Simulation", "SO100")
 DEFAULT_OUTPUT = os.path.join(
     REPO_ROOT, "source", "zombie_crawl", "zombie_crawl", "assets", "urdf", "so_arm100_float.urdf"
 )
@@ -83,6 +88,9 @@ def main() -> int:
 
     input_path = os.path.normpath(args.input)
     output_path = os.path.normpath(args.output)
+    if not os.path.isfile(input_path):
+        require_so100()  # prints clone instructions and exits
+        raise SystemExit(f"[prepare_urdf] input URDF not found: {input_path}")
     tree = ET.parse(input_path)
     root = tree.getroot()
     links = {link.get("name"): link for link in root.findall("link")}

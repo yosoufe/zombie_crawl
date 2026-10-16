@@ -1,11 +1,11 @@
 # SO-ARM100 (SO-100) URDF Analysis
 
 Repo: https://github.com/TheRobotStudio/SO-ARM100 (cloned `--depth 1`, commit `5f6d2b8`, dated 2026-09-23, "Add SO-101 leader arm URDF")
-Local clone: `/home/yousof/robotics/experimental/third_party/SO-ARM100`
+Local clone: `<workspace>/third_party/SO-ARM100`
 
 ## 1. File locations
 
-| Item | Path (relative to `/home/yousof/robotics/experimental`) |
+| Item | Path (relative to `<workspace>`) |
 |---|---|
 | **URDF (primary, SO-100 / SO-ARM100 follower)** | `third_party/SO-ARM100/Simulation/SO100/so100.urdf` |
 | SO-100 simulation meshes | `third_party/SO-ARM100/Simulation/SO100/assets/*.stl` (12 files) |
@@ -14,7 +14,7 @@ Local clone: `/home/yousof/robotics/experimental/third_party/SO-ARM100`
 | SO-101 meshes | `third_party/SO-ARM100/Simulation/SO101/assets/*.stl` (18 files) |
 | CAD source (not used by the URDF) | `third_party/SO-ARM100/STEP/**/*.step` (47 MB, 30 files) |
 | Printable STLs (not used by the URDF) | `third_party/SO-ARM100/STL/**` |
-| Analysis script (this report) | `zombie_crawl/scripts/analyze_so100_urdf.py` |
+| Analysis script (this report) | `zombie_crawl/scripts/asset_pipeline/analyze_so100_urdf.py` |
 
 Robot name in URDF: `so_arm100`. **7 links, 6 joints, all joints revolute.** No `<state>` tags, no `<dynamics>`/`<damping>` on joints, no fixed base joint (the `base` link is simply the root of the kinematic tree).
 
@@ -141,5 +141,5 @@ Caveat for SO-101 → PhysX: its `gripper_frame_link` has mass 1e-9 and **zero i
 ## 9. Method
 
 - Cloned `TheRobotStudio/SO-ARM100` with `git clone --depth 1`.
-- Parsed the URDF with `xml.etree` (no ROS/urdfdom used); script: `zombie_crawl/scripts/analyze_so100_urdf.py` (system python3 + numpy).
+- Parsed the URDF with `xml.etree` (no ROS/urdfdom used); script: `zombie_crawl/scripts/asset_pipeline/analyze_so100_urdf.py` (system python3 + numpy).
 - STL format detected via binary size formula (84 + 50·N bytes) and full vertex parse for bounding boxes; reach computed by vectorized forward kinematics on a 10-step-per-joint grid (10⁶ configurations) using the standard URDF model `child = parent · origin · Rot(axis, q)`.

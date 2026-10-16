@@ -5,8 +5,9 @@
 
 """Asset configuration for the SO-ARM100 (SO-100) free-floating crawler.
 
-The USD asset is produced by ``scripts/convert_asset.py`` from the prepared URDF in
-``assets/urdf/so_arm100_float.urdf`` (see ``scripts/prepare_urdf.py``).
+The USD asset is produced by ``scripts/asset_pipeline/convert_asset.py`` from the
+prepared URDF in ``assets/urdf/so_arm100_float.urdf`` (see
+``scripts/asset_pipeline/prepare_urdf.py``).
 
 Actuator presets
 ----------------
