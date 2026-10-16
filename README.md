@@ -450,3 +450,34 @@ python scripts/play.py --task Zombie-Crawl-SO100-v0 \
   shim mapped to the launcher's `HEADLESS=1` env var, and keeps `--viz kit` working for the GUI.
 - Headless `--video` records from scene camera sensors, not the GUI viewport — see
   [docs/video_fix.md](docs/video_fix.md) for how it works and why the old viewport clips came out frozen.
+
+### Play the shipped checkpoint (`checkpoints/model_1800.pt`)
+
+`checkpoints/model_1800.pt` is the best policy shipped with the repo: iteration 1800 of the
+4096-env training run (`~2.5 m/s-scale escapes at maxed curriculum`, 2026-10-14). It is the
+**only** file needed to replay it — rsl_rl 5.x checkpoints store just the actor/critic/optimizer
+state dicts; the network architecture and PPO hyperparameters come from the task code
+(`agents/rsl_rl_ppo_cfg.py`), so editing the hidden dims there would make this checkpoint
+incompatible. (`params/agent.yaml` and `run.json` in training run dirs are logging artifacts,
+not load inputs.)
+
+```bash
+source scripts/env.sh
+
+# Watch it live (GUI):
+python scripts/play.py --task Zombie-Crawl-SO100-v0 --checkpoint checkpoints/model_1800.pt
+
+# Record the 4K training-spec clip (4096 robots, full disturbance + 50% fallen starts,
+# ~40 s clip from the spawn moment):
+python scripts/play.py --task Zombie-Crawl-SO100-v0 \
+    --checkpoint checkpoints/model_1800.pt --video --headless
+# → checkpoints/videos/play/play_overview_*.mp4   (log dir follows the checkpoint's dir)
+# → checkpoints/exported/policy.pt + policy.onnx  (auto-exported JIT/ONNX of the loaded policy)
+
+# Deterministic metrics (termination breakdown included — see the §3 note):
+python scripts/evaluate.py --num_envs 16 --checkpoint checkpoints/model_1800.pt
+```
+
+Tip: to re-render old runs instead, `--checkpoint` also accepts any `model_N.pt` under
+`logs/rsl_rl/zombie_crawl/`, and `--checkpoint latest` picks the newest checkpoint of the
+newest run dir.
