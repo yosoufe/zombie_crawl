@@ -102,6 +102,35 @@ class StreamingVideoRecorder(VideoRecorder):
             if self._frames_step_count >= self.cfg.video_length:
                 self._close_clip()
 
+    def _get_frame(self) -> np.ndarray | None:
+        """Pull one frame with PhysX->Fabric transform writes un-gated.
+
+        Isaac Lab <=3.0 regression (upstream fixed it in PR #8339, after our pinned
+        Isaac Lab commit): headless on-demand video capture gates the explicit
+        ``PhysxManager._fabric.force_update()`` refresh on
+        ``/physics/fabricUpdateTransformations``, which headless runs keep False --
+        so the refresh writes nothing and Kit renders every PhysX body at its USD
+        DEFAULT pose for the whole clip (robots "hung" at spawn while stage-level
+        overlays like the cyan command arrows still move). Early-iteration clips
+        (small ``--video_start_iters``) show this starkly; later clips only look
+        alive because episode resets re-pose bodies through another path.
+
+        Mirrors the upstream fix locally (works for pip-wheel AND editable installs):
+        enable the setting around the base capture and restore it, so the per-frame
+        force_update inside ``KitVisualizer.render_rgb_array`` actually publishes the
+        current physics state, without paying continuous Fabric-sync cost in between.
+        """
+        sim = getattr(self._env, "sim", None)
+        key = "/physics/fabricUpdateTransformations"
+        was_enabled = bool(sim.get_setting(key)) if sim is not None else True
+        if sim is not None and not was_enabled:
+            sim.set_setting(key, True)
+        try:
+            return super()._get_frame()
+        finally:
+            if sim is not None and not was_enabled:
+                sim.set_setting(key, False)
+
     def _update_overlay(self) -> None:
         """Draw the commanded-direction (cyan) arrow overlay on the stage."""
         if not self._overlay_enabled or self._overlay_failed:
