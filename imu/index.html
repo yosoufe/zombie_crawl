@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>QMI8658 — 3D orientation</title>
+<style>
+  body { margin:0; background:#111; overflow:hidden; font-family:monospace; }
+  #hud { position:fixed; top:10px; left:10px; color:#eee; font-size:14px; line-height:1.5;
+         background:rgba(0,0,0,.5); padding:8px 12px; border-radius:6px; }
+  #status { color:#f66; } #status.ok { color:#6f6; }
+</style>
+</head>
+<body>
+<div id="hud">
+  <div id="rpy">roll -- pitch -- yaw --</div>
+  <div id="q">q = --</div>
+  <div>board t=-- fps=--</div>
+  <div id="status">connecting…</div>
+  <hr style="border-color:#444">
+  <div style="color:#ff5555">■ X (red) — long edge of the board (USB-C to the right)</div>
+  <div style="color:#55dd55">■ Y (green) — short edge of the board (USB-C to the left)</div>
+  <div style="color:#5599ff">■ Z (blue) — screen normal, out of the LCD (light-blue face)</div>
+  <div style="color:#999">flat on table, screen up ⇒ Z up, roll/pitch ≈ 0°</div>
+</div>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 100);
+camera.up.set(0, 0, 1);   // our world is Z-up (IMU convention), not three.js default Y-up
+camera.position.set(7, -7, 6);
+
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+new OrbitControls(camera, renderer.domElement);
+
+scene.add(new THREE.AmbientLight(0xbbbbbb));
+const light = new THREE.DirectionalLight(0xffffff, 2);
+light.position.set(5, 3, 8); scene.add(light);
+
+// ground grid (XY plane, since our world is Z-up)
+const grid = new THREE.GridHelper(14, 14, 0x444444, 0x222222);
+grid.rotateX(Math.PI / 2);
+scene.add(grid);
+
+// board: 49x24x8 mm / 10, screen = +Z face (sky-blue top)
+const geo = new THREE.BoxGeometry(4.9, 2.4, 0.8);
+const mats = [0x3355aa,0x3355aa, 0x3355aa,0x3355aa, 0x66ccff,0x222831]
+  .map(c => new THREE.MeshStandardMaterial({color:c}));
+const board = new THREE.Mesh(geo, mats);
+board.position.y = 0.41;
+scene.add(board);
+
+// board-local axes
+const axes = new THREE.AxesHelper(2.2);
+board.add(axes);
+
+// axis tip labels (board-local, rotate with the board)
+function label(text, color, pos) {
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const ctx = c.getContext('2d');
+  ctx.font = 'bold 48px monospace'; ctx.fillStyle = color;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(text, 32, 32);
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: new THREE.CanvasTexture(c), depthTest: false }));
+  sp.scale.set(0.8, 0.8, 0.8); sp.position.copy(pos);
+  board.add(sp);
+}
+label('X', '#ff5555', new THREE.Vector3( 2.8, 0, 0));
+label('Y', '#55dd55', new THREE.Vector3( 0, 2.8, 0));
+label('Z', '#5599ff', new THREE.Vector3( 0, 0, 2.2));
+
+const q = new THREE.Quaternion();
+const target = new THREE.Quaternion();
+let lastMsg = 0, fpsFrames = 0, fpsTime = performance.now(), fps = 0;
+let boardMs = 0;
+
+function connect() {
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onmessage = (ev) => {
+    const d = JSON.parse(ev.data);
+    if (!d.q) return;
+    target.set(d.q[1], d.q[2], d.q[3], d.q[0]); // three.js: x,y,z,w
+    lastMsg = performance.now();
+    boardMs = d.ms;
+  };
+  ws.onopen  = () => { const s = document.getElementById('status'); s.textContent='live'; s.className='ok'; };
+  ws.onclose = () => {
+    const s = document.getElementById('status'); s.textContent='disconnected — retrying'; s.className='';
+    setTimeout(connect, 1000);
+  };
+}
+connect();
+
+function animate() {
+  requestAnimationFrame(animate);
+  q.slerp(target, 0.35);
+  board.quaternion.copy(q);
+
+  fpsFrames++;
+  const now = performance.now();
+  if (now - fpsTime > 500) { fps = Math.round(fpsFrames*1000/(now-fpsTime)); fpsFrames=0; fpsTime=now; }
+
+  const e = new THREE.Euler().setFromQuaternion(q, 'ZXY');  // Z-up: yaw about Z, roll/pitch about X/Y
+  document.getElementById('rpy').textContent =
+    `roll ${THREE.MathUtils.radToDeg(e.x).toFixed(1)}°  ` +
+    `pitch ${THREE.MathUtils.radToDeg(e.y).toFixed(1)}°  ` +
+    `yaw ${THREE.MathUtils.radToDeg(e.z).toFixed(1)}°`;
+  document.getElementById('q').textContent =
+    `q = [${q.w.toFixed(3)} ${q.x.toFixed(3)} ${q.y.toFixed(3)} ${q.z.toFixed(3)}]`;
+  document.querySelector('#hud div:nth-child(3)').textContent =
+    `board t=${boardMs}ms fps=${fps}`;
+  document.getElementById('status').className =
+    (now - lastMsg < 1000) ? 'ok' : '';
+
+  renderer.render(scene, camera);
+}
+animate();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
