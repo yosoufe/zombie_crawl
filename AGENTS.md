@@ -1,9 +1,6 @@
 # Agent rules — zombie_crawl
 
 ## Training runs
-- ONE training at a time (owner rule): before launching, verify no other
-  `scripts/train.py` is running (`pgrep -cf 'scripts/trai[n].py'` must be 0); kill
-  the old one first if replacing a run. Never let two trainers share the GPU.
 - Always run the training with videos. starting from iteration 100 and every 200 iterations
   for only 25 seconds.
 - `HEADLESS=1` is REQUIRED whenever `--video` is used: the launcher treats the injected

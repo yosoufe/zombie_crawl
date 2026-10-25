@@ -228,7 +228,7 @@ def yaw_rate_stage_curriculum(
     unlock_difficulty: float = 0.75,
     stage1_rate: float = 0.10,
     step_size: float = 0.05,
-    min_steer: float = 0.7,
+    min_steer: float = 0.3,
     check_interval: int = 100,
 ) -> dict:
     """Yaw-rate command stages (P2-12), stored on ``env.extras["yaw_rate_max"]``.
@@ -239,7 +239,7 @@ def yaw_rate_stage_curriculum(
     0     0 (all commands 0)          start
     1     ``stage1_rate`` (0.10)      ``difficulty >= unlock_difficulty`` (0.75,
                                       the point phase 1 used for its dynamic heading)
-    2     +step_size per check to     ``steer_success >= min_steer`` (0.7), checked
+    2     +step_size per check to     ``steer_success >= min_steer`` (0.3, A.12-7), checked
         ``env.cfg.yaw_rate_max_final`` every ``check_interval`` curriculum calls
         (0.30 rad/s provisional)
     ====  ==========================  ==========================================

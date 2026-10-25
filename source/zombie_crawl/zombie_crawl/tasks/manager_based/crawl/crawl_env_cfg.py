@@ -447,16 +447,20 @@ class CrawlCurriculumCfg:
             "push_start_frac": 0.5,
         },
     )
-    # yaw-rate command stages (P2-12): 0 -> (difficulty >= 0.75) 0.10 -> (steer_success >= 0.7)
+    # yaw-rate command stages (P2-12): 0 -> (difficulty >= 0.75) 0.10 -> (steer_success >= 0.3)
     # +0.05 per check up to env.yaw_rate_max_final. Monotonic; order of events in a normal run:
     # crawl -> fallen starts -> pushes -> steering.
+    # A.12-7 (owner directive): gate lowered 0.7 -> 0.3. The training EMA is noise-limited
+    # (blown-up Gaussian std makes sampled actions near-random clips; disturbances + mechanics
+    # make 0.03-0.05 rad/s sustained tracking impossible in-rollout), while the deterministic
+    # policy tracks 0.91-1.00 on most (friction, cmd) combos -- see docs/phase2_report.md.
     yaw_rate_stage = CurrTerm(
         func=mdp.yaw_rate_stage_curriculum,
         params={
             "unlock_difficulty": 0.75,
             "stage1_rate": 0.10,
             "step_size": 0.05,
-            "min_steer": 0.7,
+            "min_steer": 0.3,
             "check_interval": 100,
         },
     )

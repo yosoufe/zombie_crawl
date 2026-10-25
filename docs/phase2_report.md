@@ -12,6 +12,7 @@ are appended at the end of each rung.
 | R2 (first, no lock, 3000) | `logs/rsl_rl/phase02_r2/2026-10-24_21-43-40` | stage ladder opened stage 1; **steer_success plateau 0.226 < 0.7** → stop-and-report per §A.11 (cause in A.12-5) |
 | R2 v2-full | `logs/rsl_rl/phase02_r2_v2full/2026-10-24_23-40-55` | done 1500 — train steer EMA 0.245; **deterministic steered gates 0.91–1.00 on most (friction,cmd) combos** (fails cmd −0.10 and friction-0.5 row); recovery 1.0/1.0; straight speed 0.14–0.16 (band ≤0.13) |
 | R2 track-only | `logs/rsl_rl/phase02_r2_track/2026-10-24_23-45-59` | done 1500 — train steer EMA 0.208; deterministic steer 0.00–0.37 (**worse**); straight speed 0.21–0.24; recovery 1.0/1.0 → control arm shows the SPEED CAPS, not the bump sharpening, are what matters |
+| **R2 s2 (gate 0.3, 3000)** | `logs/rsl_rl/phase02_r2_s2/2026-10-25_12-57-23` | **R2 rung PASS (owner gate 0.3)** — stage ladder: stage 1 @322, steer EMA crossed 0.3 → **stage 2 @1946**, dial full 0.30; final train crawl 1.0 / recovery 0.489 (R1 0.527, −7 %) / steer 0.373. Deterministic @model_2999: recovery 1.0/1.0 all frictions (0.18/0.66 s); steered ±0.2/±0.3 track 0.78–1.00 (+0.3 at friction 0.5 = 0.34); small commands weakest (−0.1: 0.00–0.40, tol 0.035 rad/s vs mechanical drift); straight speed 0.146–0.161 still above band ≤0.13 |
 
 Superseded/invalid runs (kept on disk per no-delete rule; do not cite):
 `phase02_r1/2026-10-23_22-30-31` (contaminated launch), `phase02_r1_stdclamp`,
@@ -50,8 +51,32 @@ and the two aborted `phase02_r2` launches that died before iteration 50
   the deterministic mean policy tracks fine. The ladder gate as specified is
   therefore not reachable without taming exploration (std clamp / entropy reduction
   — owner-approved once, later reverted) or scoring the gate from a deterministic
-  probe instead of the stochastic rollout EMA. Decision pending with owner;
+  probe instead of the stochastic rollout EMA.   Decision pending with owner;
   candidate R2 checkpoint = `phase02_r2_v2full/2026-10-24_23-40-55/model_1499.pt`.
+- **A.12-7 (owner directive, 2026-10-25): stage-2 gate lowered 0.7 -> 0.3.**
+  Rationale (owner): the policy tracks well; disturbances + the robot's mechanics make
+  sustained in-rollout yaw-rate tracking very hard, so the stochastic EMA gate at 0.7 is
+  effectively unreachable — evidence: v2-full training EMA 0.18@526 -> 0.245@1466 (rising)
+  while the deterministic policy's steered segment_success is 0.91–1.00 on most
+  friction×cmd combos (A.12-6). Edit: `min_steer` 0.7→0.3 in `CrawlCurriculumCfg.
+  yaw_rate_stage` params (crawl_env_cfg.py) + matching default/docstring in
+  `mdp/curriculums.py::yaw_rate_stage_curriculum`. Spec text (phase3_spec.md:171)
+  intentionally left at 0.7; this log records the deviation. Follow-on run:
+  `phase02_r2_s2` — v2-full reward bundle, no lock, 3000 iters, videos per owner policy;
+  expected stage-2 unlock ~iter 1800–2400 at gate 0.3. OUTCOME: unlocked at iter 1946,
+  dial reached the full 0.30, steer EMA rose to 0.39 under ±0.3 commands — gate 0.3 was
+  sufficient; an owner request to lower further to 0.2 was declined as unnecessary
+  (evidence above; param is launch-time read anyway).
+- **A.12-8 (observations, no action taken yet):** (i) deterministic steering is
+  command-magnitude dependent — large commands (±0.2/±0.3) track at 0.78–1.00, small
+  ones (±0.1) at 0.00–0.42, because the metric tolerance is max(0.35·|cmd|, 0.03)
+  = 0.035 rad/s at |cmd|=0.1 while the robot's natural drift is larger (mechanical
+  left/right asymmetry: −0.1 fails hardest at frictions 0.5/1.2). If small-command
+  tracking matters for deployment, candidates are a gyro-yaw actor input (spec watch
+  item W1) or a deadband-aware tolerance, both requiring owner sign-off. (ii) The
+  straight speed band (0.07–0.13) is still missed (0.146–0.161) despite the caps; the
+  residual ~20 % overspeed is the gait's free-glide phase under the capped-but-flat
+  reward — owner decision pending whether to pursue for R3 or accept.
 
 ## Evaluator fixes (not tuning — training unaffected)
 
