@@ -94,6 +94,12 @@ captured). Use ``--video_start_iters 1`` to record a clip immediately (e.g. to v
 vector overlay on an untrained policy) instead of the default post-warm-up iteration.
 """
 
+training_video_length: int | None = None
+"""When set by ``scripts/train.py`` from ``--video_length N``, overrides
+``CrawlEnvCfg.training_video_length`` (clip length in env steps) so a run can shorten clips
+(e.g. 1250 steps = 25 s) without touching the config default.
+"""
+
 training_video_start_offset: int = 0
 """Absolute PPO iteration this run's TensorBoard axis starts at, set by ``scripts/train.py``.
 0 for a from-scratch run; for a ``--checkpoint model_N.pt`` resume it is ``N`` (the checkpoint's

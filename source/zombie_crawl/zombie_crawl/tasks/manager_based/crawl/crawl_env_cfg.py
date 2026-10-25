@@ -743,6 +743,9 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
         if video_flags.training_video_start_iters is not None:
             self.training_video_start_iters = int(video_flags.training_video_start_iters)
             print(f"[INFO] training video start iteration overridden to {self.training_video_start_iters}")
+        if video_flags.training_video_length is not None:
+            self.training_video_length = int(video_flags.training_video_length)
+            print(f"[INFO] training video clip length overridden to {self.training_video_length} env steps")
         # Natural ~3/4 view anchored on the grid centre (world origin): camera low and to
         # the -Y side, looking across the centre. The grid is centred on the origin, so
         # several envs (and their robots) are visible around the look-at point.

@@ -76,6 +76,17 @@ if __name__ == "__main__":
             video_flags.training_video_start_iters = int(a.split("=", 1)[1])
             argv.pop(i)
             break
+    # --video_length N: clip length in env steps (see CrawlEnvCfg.training_video_length);
+    # consumed here for the same reason as --video_start_iters (Hydra has no `video` group).
+    for i, a in enumerate(argv):
+        if a == "--video_length" and i + 1 < len(argv):
+            video_flags.training_video_length = int(argv[i + 1])
+            del argv[i : i + 2]
+            break
+        if a.startswith("--video_length="):
+            video_flags.training_video_length = int(a.split("=", 1)[1])
+            argv.pop(i)
+            break
     # --checkpoint model_N.pt: capture the resume offset so training-clip filenames can line up
     # with the TensorBoard iteration axis. rsl_rl CONTINUES logging from the checkpoint's stored
     # iter (N), but the video recorder rebuilds its step counter at 0, so the filename must add N.
