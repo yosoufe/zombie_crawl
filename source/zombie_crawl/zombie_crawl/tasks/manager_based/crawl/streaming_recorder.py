@@ -132,7 +132,7 @@ class StreamingVideoRecorder(VideoRecorder):
                 sim.set_setting(key, False)
 
     def _update_overlay(self) -> None:
-        """Draw the claw-arrow (cyan) + disturbance (red) overlay on the stage."""
+        """Draw the yaw-rate arcs (green cmd / magenta actual) + disturbance (red) overlay on the stage."""
         if not self._overlay_enabled or self._overlay_failed:
             return
         # GUI overlay mode (scripts --viz kit): the ENV owns the single overlay instance and

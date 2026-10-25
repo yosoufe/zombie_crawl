@@ -29,8 +29,10 @@ watching.
 
 ``--yaw_rate <rad/s>`` pins the yaw-rate command to a CONSTANT for every robot (the
 phase-2 command input): ``0`` = straight crawl, ``0.1`` / ``-0.1`` = steered crawl left /
-right. The cyan overlay arrow shows the CLAW arrow, so a tracked command shows up as the
-base following the arrow. Without the flag, playback draws one fresh rate per episode
+right. The overlay draws a GREEN arc for the commanded rate and a MAGENTA arc for the
+actual filtered rate (both sweep from the claw axis; a full circle = 0.8 rad/s, so a full command (0.3) is a 3/8 circle), so a
+tracked command shows the magenta arc hugging the green one. Without the flag, playback
+draws one fresh rate per episode
 within +-``env.yaw_rate_max_final`` (the stage dial is force-opened outside the
 curriculum) and holds it for the whole episode.
 
@@ -94,6 +96,18 @@ if __name__ == "__main__":
             break
         if a.startswith("--yaw_rate="):
             video_flags.play_yaw_rate = float(a.split("=", 1)[1])
+            argv.pop(i)
+            break
+    # --video_length N: clip length in env steps (training-spec play records with the
+    # training video cfg; default 2000 = 40 s). Consumed here like --yaw_rate -- Hydra has
+    # no `video` group. 500 = 10 s for quick overlay checks.
+    for i, a in enumerate(argv):
+        if a == "--video_length" and i + 1 < len(argv):
+            video_flags.training_video_length = int(argv[i + 1])
+            del argv[i : i + 2]
+            break
+        if a.startswith("--video_length="):
+            video_flags.training_video_length = int(a.split("=", 1)[1])
             argv.pop(i)
             break
     if video_flags.play_yaw_rate is not None:

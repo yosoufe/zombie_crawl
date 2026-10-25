@@ -40,8 +40,9 @@ The only deviation from a training clip: recording starts at the spawn moment
 
 gui_overlay_enabled: bool = False
 """When set by ``scripts/play.py`` / ``scripts/train.py`` (from ``--viz kit``), the env drives
-:class:`~...video_overlay.VectorArrowOverlay` (cyan claw-arrow + red per-body
-disturbance arrows, drawn as stage ``VisualizationMarkers``) on EVERY env step, so the arrows
+:class:`~...video_overlay.VectorArrowOverlay` (yellow commanded + magenta actual yaw-rate
+ground arcs, plus red per-body disturbance arrows, drawn as stage ``VisualizationMarkers``)
+on EVERY env step, so the markers
 are visible in the live Kit GUI window even without ``--video``. While this flag is set the
 recorders delegate to the env's single overlay instance instead of creating their own, so a
 recording GUI run never double-draws (see :meth:`StreamingVideoRecorder._update_overlay`).

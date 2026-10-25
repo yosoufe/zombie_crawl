@@ -126,12 +126,13 @@ if __name__ == "__main__":
             "600 env steps) - independent of num_envs. For a high-res video of a finished "
             "policy use play.py --video on a checkpoint."
         )
-    # --viz kit -> live GUI arrows: the env drives the cyan/red vector-arrow overlay every
-    # step so the GUI window shows them continuously, not just inside --video clip windows
+    # --viz kit -> live GUI overlay: the env drives the yaw-arc/disturbance overlay every
+    # step so the GUI window shows it continuously, not just inside --video clip windows
     if video_flags.enable_gui_overlay_from_argv(argv):
         print(
-            "[INFO] --viz kit: live vector-arrow overlay ON -- cyan = claw arrow (base->wrist) "
-            "direction per robot, red = current disturbance force per rigid body "
+            "[INFO] --viz kit: live vector overlay ON -- green arc = commanded yaw rate, "
+            "magenta arc = actual filtered claw rate (full circle = 0.8 rad/s (0.3 = 3/8 circle), swept from "
+            "the claw axis), red = current disturbance force per rigid body "
             "(updated every env step in the GUI window)."
         )
     # --headless compatibility: the unified Isaac Lab 3.0 launcher CLI no longer
