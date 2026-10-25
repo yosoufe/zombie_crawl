@@ -210,6 +210,7 @@ def _update_claw_heading_rate(env: ManagerBasedEnv, dt: float, tau_r: float) -> 
 def forward_velocity_exp(
     env: ManagerBasedEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    cap_at_target: bool = False,
 ) -> torch.Tensor:
     """Forward-velocity reward: ``tanh(v_c / v_target)``, posture-gated. "Move along your claw."
 
@@ -229,7 +230,10 @@ def forward_velocity_exp(
     v_c = v[:, 0] * cos_u + v[:, 1] * sin_u
     target = torch.clamp(get_v_target(env), min=1e-3)
     up = flatness_gate(env, asset_cfg)
-    return torch.where(v_c > 0, up * torch.tanh(v_c / target), torch.tanh(v_c / target))
+    # cap_at_target flattens the reward above v_target (no gradient for overshooting);
+    # the backward branch stays uncapped so reversing keeps paying its full negative.
+    x_pos = torch.clamp(v_c / target, max=1.0) if cap_at_target else v_c / target
+    return torch.where(v_c > 0, up * torch.tanh(x_pos), torch.tanh(v_c / target))
 
 
 def forward_progress_lpf(
@@ -237,6 +241,7 @@ def forward_progress_lpf(
     tau_s: float = 1.0,
     normalize: bool = True,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    cap: bool = False,
 ) -> torch.Tensor:
     """Exponentially filtered forward progress along the claw axis (a ``tau_s``-second window).
 
@@ -274,6 +279,8 @@ def forward_progress_lpf(
     out = env.zombie_lp_dx / env.zombie_lp_dt
     if normalize:
         out = out / torch.clamp(get_v_target(env), min=1e-3)
+    if cap:
+        out = torch.clamp(out, max=1.0)
     return out
 
 
