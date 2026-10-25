@@ -4,10 +4,8 @@
 - ONE training at a time (owner rule): before launching, verify no other
   `scripts/train.py` is running (`pgrep -cf 'scripts/trai[n].py'` must be 0); kill
   the old one first if replacing a run. Never let two trainers share the GPU.
-- Launch training ALWAYS detached and never blocking the chat:
-  `HEADLESS=1 setsid nohup ../.venv/bin/python scripts/train.py ... > logs/<name>_train.log 2>&1 < /dev/null & disown`
-  Then check status with SHORT separate calls only — no long `sleep` polling in the
-  launch call (it blocks the chat and the harness kills detached children on timeout).
+- Always run the training with videos. starting from iteration 100 and every 200 iterations
+  for only 25 seconds.
 - `HEADLESS=1` is REQUIRED whenever `--video` is used: the launcher treats the injected
   recording visualizer as GUI intent and opens a window otherwise
   (`IsaacLab3/source/isaaclab_rl/isaaclab_rl/entrypoints/backends/train_rsl_rl.py` +

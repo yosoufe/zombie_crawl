@@ -52,38 +52,30 @@ def gait_phase_clock(env: ManagerBasedEnv, frequency: float = 0.5) -> torch.Tens
     return torch.stack([torch.sin(env.zombie_phase), torch.cos(env.zombie_phase)], dim=1)
 
 
-def heading_error_wrist(
-    env: "ManagerBasedEnv",
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=("wrist",)),
-) -> torch.Tensor:
-    """Commanded-heading observation: (cos, sin) of the angle between where the robot POINTS
-    and the commanded direction.
+def yaw_rate_cmd(env: ManagerBasedEnv, scale: float = 1.0 / 0.3) -> torch.Tensor:
+    """The commanded yaw rate [rad/s] scaled by 1/0.3 (the actor's ONLY command input).
 
-    Pointing direction = world-frame horizontal projection of the arrow from the base origin
-    to the WRIST body (down the arm toward the jaws). The commanded direction comes from
-    ``mdp.get_ref_dir``: the ``crawl_heading`` CommandManager term when ``use_dynamic_heading``
-    is on (so it JUMPS mid-episode when the target rotates), or the frozen per-episode
-    ``env.zombie_ref_yaw`` draw from ``mdp.reset_start_pose`` otherwise. Either way it is a
-    uniform +-180 deg COMMAND, so this term IS the command signal for the actor: (1, 0) means
-    "point where you must crawl". It matches what the ``wrist_pointing_error`` reward
-    measures. Returns (num_envs, 2); cos/sin are wrap-invariant.
+    Shape ``(num_envs, 1)``. This replaces the phase-1 2-D ``heading_error_wrist`` term:
+    a rate command is hardware-issuable (an operator/handicapper sends rad/s), needs no
+    absolute heading reference, and no measured heading/heading error/heading rate is
+    ever fed to the actor (the QST QMI8658 IMU has no magnetometer). The scaling matches
+    the provisional ``yaw_rate_max_final = 0.3`` rad/s so the input sits in ~[-1, 1].
     """
-    from .rewards import get_ref_dir
+    cm = getattr(env, "command_manager", None)
+    if cm is not None and "yaw_rate_cmd" in cm.active_terms:
+        return cm.get_command("yaw_rate_cmd") * scale
+    return torch.zeros(env.num_envs, 1, device=env.device)
 
-    asset = env.scene[asset_cfg.name]
-    wrist_ids = getattr(env, "zombie_wrist_body_ids", None)
-    if wrist_ids is None:
-        ids, _names = asset.find_bodies(list(asset_cfg.body_names), as_proxy=True)
-        wrist_ids = ids.torch.reshape(-1)
-        if wrist_ids.numel() == 0:
-            raise ValueError(f"heading_error_wrist: no body matching {asset_cfg.body_names}")
-        env.zombie_wrist_body_ids = wrist_ids
-    wrist = asset.data.body_pos_w.torch[:, wrist_ids[0]]
-    base = asset.data.root_pos_w.torch
-    arrow_yaw = torch.atan2(wrist[:, 1] - base[:, 1], wrist[:, 0] - base[:, 0])
-    cos_ref, sin_ref = get_ref_dir(env)
-    d = torch.atan2(
-        torch.sin(arrow_yaw) * cos_ref - torch.cos(arrow_yaw) * sin_ref,  # sin(arrow - ref)
-        torch.cos(arrow_yaw) * cos_ref + torch.sin(arrow_yaw) * sin_ref,  # cos(arrow - ref)
-    )
-    return torch.stack([torch.cos(d), torch.sin(d)], dim=-1)
+
+def claw_heading_rate_priv(
+    env: ManagerBasedEnv,
+) -> torch.Tensor:
+    """Privileged critic input: the claw heading rate ``r`` [rad/s] (``env.zombie_r_ema``).
+
+    Simulation-only measurement maintained by ``mdp._update_claw_heading_rate``; MUST NOT
+    enter the policy group (the real robot cannot observe the claw heading rate without
+    external localization).
+    """
+    from .rewards import claw_heading_rate
+
+    return claw_heading_rate(env).unsqueeze(-1)

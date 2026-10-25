@@ -6,8 +6,10 @@
 """Termination terms for the zombie crawl task.
 
 Note: the robot is *not* terminated for tipping over -- a crawler is allowed to flip
-itself and the gait is learned freely. Only numerical failure, being flung into the air,
-or leaving the bounding area terminate the episode.
+itself and the gait is learned freely. Only numerical failure or being flung into the air
+terminate the episode. The position box (``out_of_bounds``) was removed from the phase-2
+termination config (P2-7): success is a logged metric (``crawl_success``) that drives the
+curriculum; the function is kept only so ``use_box_termination`` can bisect (§A.11).
 """
 
 from __future__ import annotations
@@ -50,7 +52,11 @@ def out_of_bounds(
     y_range: float = 1.5,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """True if the robot leaves its bounding area around the environment origin."""
+    """True if the robot leaves its bounding area around the environment origin.
+
+    Removed from the termination config in phase 2 (P2-7); re-enabled only via
+    ``env.use_box_termination=true`` for diagnostic runs.
+    """
     asset = env.scene[asset_cfg.name]
     pos_w = asset.data.root_pos_w.torch
     origins = env.scene.env_origins.to(pos_w.device)
@@ -65,43 +71,35 @@ def stalled(
     stall_time_s: float = 12.0,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """True if the base has not crawled ``min_displacement`` along its reference (jaw)
-    axis within ``stall_time_s``.
+    """True if the base has not moved ``min_displacement`` (EUCLIDEAN, horizontal) from the
+    window anchor within ``stall_time_s`` (P2-8).
 
-    Records each env's start position on the first step after reset (when
-    ``episode_length_buf`` is still <= 1) and terminates episodes that stall out of their
-    start position. Displacement is measured along the frozen reference axis, not world
-    +X: with uniform ±180deg spawn yaw a world-axis test kills successful crawlers whose
-    heading happens to be perpendicular to +X. This is a *failure* termination (not a
-    timeout), so the value function treats "doing nothing" as bad rather than as a free ride.
+    Axis-free by construction: the distance is Euclidean, so a rotating claw axis cannot
+    fake progress (pitfall X3), and it does not care which way the robot was commanded --
+    it applies to fallen starts too. The anchor (position + ``episode_length_buf`` step)
+    is recorded by ``mdp.reset_start_pose`` on every reset (provably runs); the old
+    ``episode_length_buf <= 1`` heuristic and the mid-episode command-resample re-anchor
+    are gone -- this term does NOT re-anchor on command changes. At each check past the
+    window the env either terminates (no movement -> failure, non-bootstrapped, so
+    "doing nothing" is bad rather than a free ride) or re-anchors (anchor = now) and
+    continues, giving a rolling 12 s window.
     """
-    from .rewards import crawl_heading_resample_flag, get_ref_dir
-
     asset = env.scene[asset_cfg.name]
     pos_xy = asset.data.root_pos_w.torch[:, :2]
     el = env.episode_length_buf
-    start_xy = getattr(env, "zombie_start_xy", None)
-    if start_xy is None or start_xy.shape[0] != pos_xy.shape[0]:
-        env.zombie_start_xy = pos_xy.clone()
-        # episode step at which each env's current stall window opened (episode_length_buf
-        # is env-owned and drives time_out; we keep our own anchor instead of touching it)
-        env.zombie_stall_anchor = torch.zeros_like(el)
-    else:
-        if not hasattr(env, "zombie_stall_anchor") or env.zombie_stall_anchor.shape != el.shape:
-            env.zombie_stall_anchor = torch.zeros_like(el)
-        just_reset = el <= 1
-        if just_reset.any():
-            env.zombie_start_xy[just_reset] = pos_xy[just_reset]
-            env.zombie_stall_anchor[just_reset] = el[just_reset]
-        # with a dynamic commanded heading, displacement along the OLD axis says nothing
-        # about the NEW command: re-anchor position AND restart the stall window on resample
-        resampled = crawl_heading_resample_flag(env)
-        if resampled is not None and resampled.any():
-            env.zombie_start_xy[resampled] = pos_xy[resampled]
-            env.zombie_stall_anchor[resampled] = el[resampled]
-    cos_ref, sin_ref = get_ref_dir(env)
-    dx = (pos_xy[:, 0] - env.zombie_start_xy[:, 0]) * cos_ref + (
-        pos_xy[:, 1] - env.zombie_start_xy[:, 1]
-    ) * sin_ref
+    anchor_xy = getattr(env, "zombie_stall_anchor_xy", None)
+    if anchor_xy is None or anchor_xy.shape != pos_xy.shape or env.zombie_stall_anchor_step.shape != el.shape:
+        # first steps before the initial reset event populated the anchors: adopt now
+        env.zombie_stall_anchor_xy = pos_xy.clone()
+        env.zombie_stall_anchor_step = el.clone()
+        return torch.zeros(pos_xy.shape[0], dtype=torch.bool, device=pos_xy.device)
     stall_steps = int(round(stall_time_s / (env.cfg.decimation * env.cfg.sim.dt)))
-    return (el - env.zombie_stall_anchor > stall_steps) & (dx.abs() < min_displacement)
+    disp = (pos_xy - anchor_xy).norm(dim=1)
+    elapsed = el - env.zombie_stall_anchor_step
+    past = elapsed > stall_steps
+    terminate = past & (disp < min_displacement)
+    re_anchor = past & ~terminate
+    if bool(re_anchor.any()):
+        anchor_xy[re_anchor] = pos_xy[re_anchor]
+        env.zombie_stall_anchor_step[re_anchor] = el[re_anchor]
+    return terminate

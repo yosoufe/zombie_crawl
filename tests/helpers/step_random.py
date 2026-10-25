@@ -40,7 +40,7 @@ cfg.seed = args_cli.seed
 env = gym.make("Zombie-Crawl-SO100-v0", cfg=cfg)
 
 action_dim = env.unwrapped.action_manager.total_action_dim
-print(f"[helper] action_dim={action_dim}")
+print(f"[helper] action_dim={action_dim}", flush=True)
 obs = env.get_observations() if hasattr(env, "get_observations") else env.reset()
 
 ok = True
@@ -49,11 +49,11 @@ for step in range(args_cli.steps):
     obs, rewards, terminated, truncated, info = env.step(actions)
     state = env.unwrapped.scene["robot"].data.root_state_w
     if not torch.isfinite(state).all():
-        print(f"[helper] FAIL: non-finite root state at step {step}")
+        print(f"[helper] FAIL: non-finite root state at step {step}", flush=True)
         ok = False
         break
     if not torch.isfinite(rewards).all():
-        print(f"[helper] FAIL: non-finite reward at step {step}")
+        print(f"[helper] FAIL: non-finite reward at step {step}", flush=True)
         ok = False
         break
 

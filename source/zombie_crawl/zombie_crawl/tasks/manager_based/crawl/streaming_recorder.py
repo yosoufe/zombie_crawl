@@ -111,7 +111,7 @@ class StreamingVideoRecorder(VideoRecorder):
         ``/physics/fabricUpdateTransformations``, which headless runs keep False --
         so the refresh writes nothing and Kit renders every PhysX body at its USD
         DEFAULT pose for the whole clip (robots "hung" at spawn while stage-level
-        overlays like the cyan command arrows still move). Early-iteration clips
+        overlays like the cyan claw arrows still move). Early-iteration clips
         (small ``--video_start_iters``) show this starkly; later clips only look
         alive because episode resets re-pose bodies through another path.
 
@@ -132,7 +132,7 @@ class StreamingVideoRecorder(VideoRecorder):
                 sim.set_setting(key, False)
 
     def _update_overlay(self) -> None:
-        """Draw the commanded-direction (cyan) arrow overlay on the stage."""
+        """Draw the claw-arrow (cyan) + disturbance (red) overlay on the stage."""
         if not self._overlay_enabled or self._overlay_failed:
             return
         # GUI overlay mode (scripts --viz kit): the ENV owns the single overlay instance and

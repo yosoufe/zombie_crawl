@@ -1,11 +1,15 @@
-"""3D command-vector overlay for training video recordings.
+"""3D vector overlay for training video recordings.
 
 Drawn on the USD stage through Isaac Lab's own :class:`VisualizationMarkers` (a
 ``UsdGeom.PointInstancer``), so the arrows render inside the headless world-viewer render
 product that the training video captures (this is the same marker path every Isaac Lab
 sensor debug-vis uses). One slim cyan arrow floats over EVERY robot:
 
-- cyan arrow: the COMMANDED crawl direction; the cone's TIP points where the robot must crawl.
+- cyan arrow: the CLAW arrow (base -> wrist, the locomotion axis every directional reward
+  is scored on); the cone's TIP points where the base must travel. The phase-1 cyan
+  "commanded heading" arrow is gone with the removed heading command (P2-13) -- the claw
+  arrow is the useful visual under a yaw-rate command (watch items W2/W3: does the base
+  follow the arrow, or does only the arm swing?).
 - red arrow(s): the CURRENT disturbance force on EVERY rigid body (base + every link),
   aimed along the last force sampled by ``mdp.disturb_all_bodies`` (read from
   ``env.extras["disturb_forces"]``); length grows with force magnitude, so a body being
@@ -142,12 +146,12 @@ class VectorArrowOverlay:
         pos = robot.data.root_pos_w.torch[ids]
         n = ids.shape[0]
         dev = pos.device
-        # command source shared with the rewards/obs (mdp.get_ref_dir): frozen zombie_ref_yaw
-        # in v0 mode, or the live crawl_heading command term (arrow JUMPS mid-episode when
-        # the target rotates with use_dynamic_heading)
-        from .mdp.rewards import get_ref_dir
+        # claw arrow shared with the rewards/obs (mdp.get_claw_dir): the locomotion axis
+        # the policy must drag its base along (the phase-1 commanded-heading arrow was
+        # removed with the heading command -- P2-13)
+        from .mdp.rewards import get_claw_dir
 
-        cos_full, sin_full = get_ref_dir(env)
+        cos_full, sin_full = get_claw_dir(env)
         total = robot.data.root_pos_w.torch.shape[0]
         if cos_full.shape[0] == total:
             ref_cos, ref_sin = cos_full[ids], sin_full[ids]

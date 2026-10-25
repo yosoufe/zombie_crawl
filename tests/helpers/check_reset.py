@@ -46,11 +46,11 @@ for i in range(10):  # 10 rounds of resets
     origins = env.unwrapped.scene.env_origins[:, 0:2]
     dxy = (pos - origins).norm(dim=1)
     if (z < -0.01).any():
-        print(f"[helper] FAIL: base below ground: min z={z.min().item():.4f}")
+        print(f"[helper] FAIL: base below ground: min z={z.min().item():.4f}", flush=True)
         ok = False
         break
     if (dxy > 2.5).any():
-        print(f"[helper] FAIL: base outside bounding area: max |xy|={dxy.max().item():.4f}")
+        print(f"[helper] FAIL: base outside bounding area: max |xy|={dxy.max().item():.4f}", flush=True)
         ok = False
         break
 

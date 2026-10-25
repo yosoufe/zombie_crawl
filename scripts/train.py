@@ -13,20 +13,21 @@ importing the package before dispatch, so the standard CLI is used unchanged:
     python scripts/train.py --task Zombie-Crawl-SO100-v0 --num_envs 64 --max_iterations 100 --headless
     python scripts/train.py --task Zombie-Crawl-SO100-v0 --num_envs 64 --max_iterations 100 --viz kit
 
-Dynamic commanded heading (mid-episode resampled crawl direction, per env, staggered):
-append the Hydra override ``env.use_dynamic_heading=true`` (optionally with
-``env.heading_resample_range=[6,12]`` [s], ``env.heading_range=[-3.1416,3.1416]``):
+Phase 2 command: the actor's single command input is a per-env yaw rate (rad/s)
+resampled every ``env.commands.yaw_rate_cmd.resampling_time_range`` seconds (default
+[5,8], per env, staggered). The yaw-rate STAGE curriculum (P2-12) climbs the command
+range automatically: 0 (straight only) -> 0.10 rad/s at difficulty >= 0.75 -> +0.05 per
+check up to ``env.yaw_rate_max_final`` (0.30 provisional) once ``steer_success >= 0.7``.
+Useful Hydra overrides:
 
-    python scripts/train.py --task Zombie-Crawl-SO100-v0 env.use_dynamic_heading=true \\
-        --num_envs 2048 --max_iterations 3000
+    env.yaw_rate_max_final=0.3        # provisional command cap [rad/s]
+    env.yaw_rate_stage_lock=0         # R1: keep steering locked off (commands always 0)
+    env.commands.yaw_rate_cmd.resampling_time_range=[5,8]
+    env.use_box_termination=true      # diagnostic: re-add the removed position box (§A.11)
 
-Curriculum-staged like disturbances: the command only starts JUMPING once the global
-curriculum difficulty reaches ``env.heading_curriculum_frac`` (default 0.75 -- after
-fallen spawns [0, 0.5] and pushes [0.5, 1]). Before the gate the heading is frozen per
-episode (v0 behaviour). Use ``env.heading_curriculum_frac=0`` for dynamic from step one.
-Watch ``Metrics/crawl_heading/gate_open`` (0 until unlock) and
-``Metrics/crawl_heading/resamples_per_episode`` in TensorBoard.
-Off by default -> the frozen per-episode command direction (v0 behaviour) is unchanged.
+Watch in TensorBoard: ``Curriculum/crawl_metrics/*`` (crawl/recovery/steer_success,
+back_frac, base_yaw_rate_abs, r_abs), ``Curriculum/yaw_rate_stage/*`` (dial + stage),
+``Curriculum/difficulty/*``, and ``Metrics/yaw_rate_cmd/*``.
 
 ``--headless`` is accepted for compatibility with Isaac Lab 2.x command lines: the
 unified 3.0 launcher CLI no longer registers the flag (headless is the default when
@@ -118,7 +119,7 @@ if __name__ == "__main__":
     # step so the GUI window shows them continuously, not just inside --video clip windows
     if video_flags.enable_gui_overlay_from_argv(argv):
         print(
-            "[INFO] --viz kit: live vector-arrow overlay ON -- cyan = commanded crawl "
+            "[INFO] --viz kit: live vector-arrow overlay ON -- cyan = claw arrow (base->wrist) "
             "direction per robot, red = current disturbance force per rigid body "
             "(updated every env step in the GUI window)."
         )

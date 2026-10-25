@@ -40,7 +40,7 @@ The only deviation from a training clip: recording starts at the spawn moment
 
 gui_overlay_enabled: bool = False
 """When set by ``scripts/play.py`` / ``scripts/train.py`` (from ``--viz kit``), the env drives
-:class:`~...video_overlay.VectorArrowOverlay` (cyan commanded-direction + red per-body
+:class:`~...video_overlay.VectorArrowOverlay` (cyan claw-arrow + red per-body
 disturbance arrows, drawn as stage ``VisualizationMarkers``) on EVERY env step, so the arrows
 are visible in the live Kit GUI window even without ``--video``. While this flag is set the
 recorders delegate to the env's single overlay instance instead of creating their own, so a
@@ -56,14 +56,13 @@ instantaneous force when the GUI/recorder overlay is active (``--viz kit`` or ``
 Default off -> playback stays deterministic (no pushes), exactly as before.
 """
 
-play_dynamic_heading: bool = False
-"""When set by ``scripts/play.py`` from ``--dynamic_heading``, playback keeps the
-mid-episode resampled command heading ALIVE: the deterministic ``play_mode()`` path does
-NOT pin ``crawl_heading.resampling_time_range`` to one-episode-length, so every env gets
-a fresh +-180 deg crawl direction mid-episode (staggered every
-``heading_resample_range`` seconds) exactly like a unlocked training run. The script also
-appends the Hydra override ``env.use_dynamic_heading=true`` so the command term exists.
-Without this flag, playback stays deterministic (one heading per episode).
+play_yaw_rate: float | None = None
+"""When set by ``scripts/play.py`` from ``--yaw_rate <rad/s>``, playback pins the yaw-rate
+command to that CONSTANT for every environment: ``CrawlRLEnv.__init__`` calls
+``UniformYawRateCommand.pin(value)`` on the ``yaw_rate_cmd`` term, so resampling cannot
+overwrite it. Without this flag playback stays deterministic with one drawn rate per
+episode (``play_mode`` force-opens the stage dial and pins the resample to the episode
+length).
 """
 
 def enable_gui_overlay_from_argv(argv: list[str]) -> bool:

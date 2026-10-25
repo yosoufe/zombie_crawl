@@ -3,14 +3,24 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Configuration for the SO-ARM100 zombie crawl task (manager-based).
+"""Configuration for the SO-ARM100 zombie crawl task (manager-based, phase 2).
+
+Phase 2 replaced the 2-D heading-error actor input (world-frame, needs external
+localization) with a 1-D yaw-rate command ``yaw_rate_cmd`` (rad/s): the actor tracks a
+commanded claw heading rate instead of pointing at a commanded world direction, and the
+claw heading rate ``r`` is a simulation-only measurement (critic input, never on the
+robot). Actor observation: 25-D = gravity(3) + ang.vel(3) + joint_pos(6) + joint_vel(6)
++ last_action(6) + yaw_rate_cmd(1).
 
 Tunables (also overridable with Hydra):
     actuator_preset          "servo" (default) | "ideal"
     v_target                 final forward velocity target [m/s] (0.05-0.20)
     v_target_start           curriculum starting target [m/s]
-    use_curriculum           enable v_target + friction curriculum
-    use_velocity_commands    velocity-command tracking stub (phase 2, off)
+    use_curriculum           enable v_target + friction + difficulty + yaw-rate curriculum
+    yaw_rate_max_final       provisional yaw-rate command cap [rad/s] (stage 2 ceiling)
+    yaw_rate_resample_range  command hold time [s] before a fresh per-env draw
+    yaw_rate_stage_lock      debug: force a yaw-rate stage (0 = steering locked off)
+    use_box_termination      diagnostic re-enable of the removed position box (off)
     use_gait_clock           append sinusoidal gait-phase clock to actor obs (off)
     num_envs / env_spacing   parallelism & env isolation
 """
@@ -154,25 +164,13 @@ class CrawlSceneCfg(InteractiveSceneCfg):
 
 @configclass
 class CrawlCommandsCfg:
-    """Command terms -- ``base_velocity`` only when ``use_velocity_commands`` (phase 2 stub),
-    ``crawl_heading`` only when ``use_dynamic_heading`` (mid-episode resampled direction)."""
+    """Command terms -- ``yaw_rate_cmd`` (phase 2): per-env commanded yaw rate, resampled
+    uniformly every ``resampling_time_range`` seconds (staggered) and at every reset."""
 
-    crawl_heading: mdp.UniformCrawlHeadingCommandCfg = None
-
-    base_velocity = mdp.UniformVelocityCommandCfg(
-        asset_name="robot",
-        resampling_time_range=(8.0, 8.0),
-        rel_standing_envs=0.0,
-        rel_heading_envs=1.0,
-        heading_command=False,
-        heading_control_stiffness=0.5,
+    yaw_rate_cmd: mdp.UniformYawRateCommandCfg = mdp.UniformYawRateCommandCfg(
+        resampling_time_range=(5.0, 8.0),
         debug_vis=False,
-        ranges=mdp.UniformVelocityCommandCfg.Ranges(
-            lin_vel_x=(0.05, 0.15),
-            lin_vel_y=(-0.05, 0.05),
-            ang_vel_z=(-0.3, 0.3),
-            heading=(-math.pi, math.pi),
-        ),
+        zero_prob=0.2,
     )
 
 
@@ -219,14 +217,14 @@ class CrawlObservationsCfg:
 
     @configclass
     class PolicyCfg(ObsGroup):
-        """Actor observations: 27-D (29-D with the optional gait clock)."""
+        """Actor observations: 25-D (27-D with the optional gait clock)."""
 
         projected_gravity = ObsTerm(func=mdp.projected_gravity, noise=Unoise(n_min=-0.05, n_max=0.05))
-        # (cos, sin) of the angle between the base->wrist pointing arrow and the frozen
-        # reference axis -- hands the actor the pointing error the wrist_pointing reward uses.
-        # NOTE: requires the world-frame wrist position (external localization), so this
-        # term is NOT proprioception-only; drop it for a strict sim-to-real transfer.
-        heading_err = ObsTerm(func=mdp.heading_error_wrist)
+        # the ONLY command input: commanded yaw rate [rad/s] scaled by 1/0.3. Replaces the
+        # phase-1 2-D heading_err term -- a rate command needs no external localization and
+        # no absolute heading (the QMI8658 IMU has no magnetometer). The actor gets NO
+        # measured heading / heading error / heading rate.
+        yaw_rate_cmd = ObsTerm(func=mdp.yaw_rate_cmd)
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=Unoise(n_min=-0.2, n_max=0.2))
         joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
         joint_vel = ObsTerm(func=mdp.joint_vel, noise=Unoise(n_min=-0.5, n_max=0.5))
@@ -240,11 +238,14 @@ class CrawlObservationsCfg:
 
     @configclass
     class CriticCfg(ObsGroup):
-        """Privileged extras: 5-D (concatenated with the policy group by the runner)."""
+        """Privileged extras: 6-D (concatenated with the policy group by the runner)."""
 
         base_lin_vel = ObsTerm(func=mdp.base_lin_vel)
         base_height = ObsTerm(func=mdp.base_height)
         ground_friction = ObsTerm(func=mdp.ground_friction)
+        # r: the filtered claw heading rate [rad/s] -- simulation-only, must NEVER enter
+        # the policy group (mdp.claw_heading_rate; the robot cannot observe it)
+        claw_heading_rate = ObsTerm(func=mdp.claw_heading_rate_priv)
 
         def __post_init__(self):
             self.enable_corruption = False
@@ -256,22 +257,30 @@ class CrawlObservationsCfg:
 
 @configclass
 class CrawlRewardsCfg:
-    """Reward terms. Weights are starting points (see docs/training_report.md for tuning notes)."""
+    """Reward terms. Weights are starting points (see docs/phase2_report.md for tuning notes).
 
-    # main: steady forward motion (ungated tanh: linear reward from a dead stop, no minimum-speed
-    # cutoff -- a slow correct-direction creep already pays; backward pays negative). Weight raised
-    # 1.5 -> 2.5 so forward crawling clearly dominates every shaping/smoothing penalty and the policy
-    # has a strong slope to follow. forward_progress (net displacement) remains the anti-park lever.
+    Phase 2 (yaw-rate command): all directional terms are additive and measured on the
+    claw axis; the ``wrist_pointing`` term is REMOVED -- its job (claw leads, no tail-first
+    crawl) is done by ``forward_velocity`` now being scored on the claw axis: advancing
+    against the arrow pays negative (watch item W2 logs any residual backward crawling).
+    """
+
+    # main: steady forward motion ON THE CURRENT CLAW AXIS (tanh: linear reward from a dead
+    # stop, no minimum-speed cutoff -- a slow correct-direction creep already pays; backward
+    # pays negative). The forward half keeps the posture gate (up); the backward half is the
+    # plain negative tanh. Weight 2.5 keeps forward crawling clearly dominant over every
+    # shaping/smoothing penalty. forward_progress (net displacement) remains the anti-park lever.
     forward_velocity = RewTerm(func=mdp.forward_velocity_exp, weight=2.5)
-    # net displacement toward the GOAL (command axis), normalized by v_target. The anti-park lever.
+    # net claw-axis displacement (axis-free increments; P2-5), normalized by v_target. The anti-park lever.
     forward_progress = RewTerm(func=mdp.forward_progress_lpf, weight=1.0, params={"tau_s": 1.0})
-    # Point the claw (base->wrist) at the commanded heading. This is now a STANDALONE additive reward
-    # (forward_velocity is scored on the goal axis, so this term, not a product, is what makes the
-    # claw LEAD). It is the anti-tail-first term: a robot that advances toward the goal while dragging
-    # the claw behind it has claw->command ~reversed, so this pays ~-2*weight and dominates the
-    # forward speed term -> walking backward is strictly dominated. Weight raised -1.0 -> -1.5 so the
-    # claw-first requirement clearly outweighs the goal-speed reward.
-    wrist_pointing = RewTerm(func=mdp.wrist_pointing_error, weight=-1.5)
+    # NEW: track the commanded claw heading rate. up * clamp(tanh(v_c/v_target),0,1) * mask *
+    # exp(-((r - yaw_rate_cmd)/sigma)^2): pays ONLY while crawling forward (a zero command
+    # tracked while standing still earns exactly nothing -- an ungated bump collapses PPO to
+    # sitting) and returns 0 while the steering stage is locked (yaw_rate_max == 0). The
+    # mask fades in over yaw_mask_s after every resample/reset (r lags a fresh command).
+    # The factors inside are gates on this ONE term -- the only sanctioned exception to the
+    # additive-terms rule (P2-4); NEVER multiply separate rewards.
+    yaw_rate_tracking = RewTerm(func=mdp.yaw_rate_tracking, weight=1.5)
     lateral_velocity = RewTerm(func=mdp.lateral_velocity, weight=-1.0)
     # anti-exploit terms
     overspeed = RewTerm(func=mdp.overspeed_penalty, weight=-2.0, params={"factor": 2.0})
@@ -304,9 +313,15 @@ class CrawlTerminationsCfg:
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
     base_nan = DoneTerm(func=mdp.base_nan)
     base_too_high = DoneTerm(func=mdp.base_too_high, params={"height": 0.45})
-    out_of_bounds = DoneTerm(func=mdp.out_of_bounds, params={"x_range": 2.5, "y_range": 1.5})
-    # "sit still" exploit guard: after 12 s, an episode that has not crawled 5 cm along +X
-    # is ended as a FAILURE (no bootstrap), so doing nothing is no longer a viable strategy
+    # out_of_bounds REMOVED in phase 2 (P2-7): success is the logged crawl_success metric
+    # that drives the curriculum, not a position box. env.use_box_termination=true
+    # re-adds it (installed in __post_init__) only for bisecting a failing rung (§A.11).
+    out_of_bounds: DoneTerm = None
+    # "sit still" exploit guard (P2-8): EUCLIDEAN horizontal displacement from a window
+    # anchor; an episode that has not moved 5 cm within 12 s is ended as a FAILURE (no
+    # bootstrap), so doing nothing is no longer a viable strategy. The anchor is recorded
+    # by reset_start_pose on every reset; it does NOT re-anchor on command resamples and
+    # applies to fallen starts too.
     stalled = DoneTerm(func=mdp.stalled, params={"min_displacement": 0.05, "stall_time_s": 12.0})
 
 
@@ -322,18 +337,17 @@ class CrawlEventsCfg:
         mode="reset",
         params={
             "poses": START_POSES,
-            # ~50% of episodes start toppled (on_side + face_down) so the upright_bonus reward
-            # exercises recovery; the other 50% start folded so the forward crawl gait is preserved.
-            "pose_weights": (0.5, 0.25, 0.25),
+            # P2-9 (pitfall X1): the training default is FOLDED ONLY. Fallen starts come
+            # exclusively from env.extras["fallen_frac"], set by the difficulty curriculum
+            # once the population crawls reliably. The old baked 0.5/0.25/0.25 fallback is
+            # gone: a replaced/disabled curriculum can no longer silently start half the
+            # population toppled from iteration 0.
+            "pose_weights": (1.0, 0.0, 0.0),
             "joint_noise": 0.1,
             "xy_offset": 0.05,
-            # +-pi/2 instead of +-pi: a 180-degree turn-off is too costly early in training
-            # uniform facing: with use_dynamic_heading OFF, rewards/curriculum score motion
-            # along the frozen command heading (mdp.reset_start_pose records it on
-            # env.zombie_ref_yaw), so the task is rotationally symmetric and needs no world-+X
-            # reference the policy cannot observe. With the flag ON, the crawl_heading command
-            # term owns the direction (mdp.get_ref_dir) and resamples it mid-episode; this
-            # draw only randomizes the SPAWN facing, not the command.
+            # uniform spawn facing: the task is rotationally symmetric (the command is a
+            # yaw RATE; nothing directional is drawn at reset anymore -- the old
+            # zombie_ref_yaw command draw is gone with the removed heading command).
             "yaw_range": (-math.pi, math.pi),
         },
     )
@@ -383,7 +397,17 @@ class CrawlEventsCfg:
 
 @configclass
 class CrawlCurriculumCfg:
-    """Curriculum: ease v_target in and decay the extra friction multiplier."""
+    """Curriculum (P2-11/P2-12): the Phase-1 dials with the box-escape gate replaced by
+    the success metrics, plus the yaw-rate command stage dial.
+
+    All gates read the :mod:`.metrics` population EMAs (upright-start crawl_success,
+    fallen-start recovery_success, per-segment steer_success) computed by
+    ``crawl_metrics_curriculum``, which runs at the START of the reset step before the
+    reset events. ``check_interval`` counts curriculum calls (as in phase 1).
+    """
+
+    # success metrics + W2/W3 watch diagnostics; scored and logged every reset step
+    crawl_metrics = CurrTerm(func=mdp.crawl_metrics_curriculum)
 
     v_target = CurrTerm(
         func=mdp.v_target_curriculum,
@@ -392,7 +416,7 @@ class CrawlCurriculumCfg:
             "v_final": 0.10,
             "step_size": 0.005,
             "min_fraction": 0.6,
-            "min_escape": 0.5,
+            "min_crawl": 0.5,
             "check_interval": 100,
         },
     )
@@ -403,25 +427,37 @@ class CrawlCurriculumCfg:
             "scale_final": 1.0,
             "step_size": 0.05,
             "min_fraction": 0.6,
-            "min_escape": 0.5,
+            "min_crawl": 0.5,
             "check_interval": 200,
         },
     )
     # recovery/robustness staging: ramp fallen-start fraction + all-body disturbance 0 -> full ONLY
-    # after the population reliably crawls OUT of the box (sustained out_of_bounds >= min_escape),
-    # then keeps ramping while forward progress holds. Within Phase 2 the sub-channels are STAGGERED:
-    # fallen starts fill first (learn to get UP), pushes only turn on afterwards (push_start_frac).
+    # after the population reliably crawls (crawl_success >= min_crawl, upright starts only --
+    # pitfall X2), then keeps ramping while forward progress holds. Within phase 2 the sub-channels
+    # are STAGGERED: fallen starts fill first (learn to get UP), pushes only turn on afterwards.
     difficulty = CurrTerm(
         func=mdp.difficulty_curriculum,
         params={
-            "start_after_v": 0.09,
             "step_size": 0.05,
             "check_interval": 100,
             "min_fraction": 0.6,
-            "min_escape": 0.5,
+            "min_crawl": 0.5,
             "fallen_max": 0.5,
             "push_max": 1.0,
             "push_start_frac": 0.5,
+        },
+    )
+    # yaw-rate command stages (P2-12): 0 -> (difficulty >= 0.75) 0.10 -> (steer_success >= 0.7)
+    # +0.05 per check up to env.yaw_rate_max_final. Monotonic; order of events in a normal run:
+    # crawl -> fallen starts -> pushes -> steering.
+    yaw_rate_stage = CurrTerm(
+        func=mdp.yaw_rate_stage_curriculum,
+        params={
+            "unlock_difficulty": 0.75,
+            "stage1_rate": 0.10,
+            "step_size": 0.05,
+            "min_steer": 0.7,
+            "check_interval": 100,
         },
     )
 
@@ -457,32 +493,33 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
     v_target_start: float = 0.06
     """Curriculum starting forward velocity target [m/s]."""
     use_curriculum: bool = True
-    """Enable the v_target + friction curriculum."""
-    use_velocity_commands: bool = False
-    """Phase-2 stub: track commanded (vx, vy, yaw_rate) instead of a fixed v_target."""
-    use_dynamic_heading: bool = False
-    """Resample the commanded crawl heading MID-EPISODE instead of freezing it per episode.
+    """Enable the v_target + friction + difficulty + yaw-rate curriculum."""
+    yaw_rate_max_final: float = 0.30
+    """Provisional yaw-rate command cap [rad/s] the stage-2 curriculum climbs to.
 
-    Off (default): today's v0 behaviour — the direction is drawn once per episode by
-    ``mdp.reset_start_pose`` (``env.zombie_ref_yaw``) and stays frozen.
-    On: a ``mdp.UniformCrawlHeadingCommand`` command term owns the direction; every env
-    independently keeps its heading for ``heading_resample_range`` seconds (uniform draw),
-    then gets a fresh +-180 deg target mid-episode. All directional terms (rewards, stall
-    gate, curriculum gates, the cyan video arrow) follow via ``mdp.get_ref_dir``, and the
-    stateful ones (progress LPF, stall anchor, velocity EMA) re-anchor on resample.
-    Enable with Hydra: ``env.use_dynamic_heading=true``; mid-episode jumps unlock at
-    ``env.heading_curriculum_frac`` of curriculum difficulty (see that field).
-    """
-    heading_resample_range: tuple[float, float] = (6.0, 12.0)
-    """Seconds each commanded heading is held before a fresh draw (uniform per env, staggered
-    by the CommandManager). ~2 command changes per 20 s episode at the defaults."""
-    heading_range: tuple[float, float] = (-math.pi, math.pi)
-    """Uniform range [rad] the commanded heading is drawn from."""
-    heading_curriculum_frac: float = 0.75
-    """Global-curriculum difficulty at which mid-episode heading resampling unlocks (0 disables
-    the gate). Staggered AFTER the difficulty curriculum's channels (fallen spawns [0, 0.5],
-    pushes [0.5, 1]): the command only starts jumping once the policy already crawls reliably
-    under disturbances. Below the gate the heading stays frozen per episode (v0 behaviour)."""
+    The turn-rate limit is unknown -- RL discovers the reachable range; 0.3 rad/s is a
+    provisional ceiling, not a measured limit. Read LIVE by the stage curriculum, so it can
+    be set post-construction with the Hydra override ``env.yaw_rate_max_final=<float>``."""
+    yaw_rate_resample_range: tuple[float, float] = (5.0, 8.0)
+    """Seconds each commanded yaw rate is held before a fresh draw (uniform per env,
+    staggered by the CommandManager; P2-2). ~2-3 command changes per 20 s episode."""
+    yaw_rate_ema_tau_s: float = 1.5
+    """Time constant [s] of the claw-heading-rate EMA filter ``r`` (P2-6, fixed constant)."""
+    yaw_mask_s: float = 2.0
+    """Post-resample tracking mask ramp [s]: yaw_rate_tracking fades in over this window
+    because the filtered rate ``r`` lags a fresh command (W4)."""
+    yaw_rate_stage_lock: int | None = None
+    """Debug (read live by the stage curriculum): force a yaw-rate stage. ``0`` keeps
+    steering locked off (rung R1: the actor keeps the always-zero yaw_rate_cmd input);
+    ``1``/``2`` jump straight to that stage ignoring the gates. ``None`` = automatic."""
+    use_box_termination: bool = False
+    """Diagnostic: re-add the removed ``out_of_bounds`` termination (P2-7), ONLY for
+    bisecting a failing rung (§A.11). Episodes otherwise always run to their end."""
+    play_yaw_rate_max: float | None = None
+    """When set (play/evaluation), the initial ``env.extras["yaw_rate_max"]`` so the command
+    term actually draws non-zero rates outside the curriculum (which owns the dial in
+    training). ``play_mode`` sets it to :attr:`yaw_rate_max_final` for live per-episode
+    command draws; ``play.py --yaw_rate`` pins a constant instead."""
     use_gait_clock: bool = False
     """Append a sinusoidal gait-phase clock to the actor observations."""
     num_envs: int = 2048
@@ -511,6 +548,11 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
     play_video_push_multiplier: float = 1.0
     """Multiplier on the training disturbance force/torque ranges for ``play.py --video``
     playback (1.0 = exactly the training disturbance; e.g. 2.0 for a harsher demo clip)."""
+    play_video_fallen_frac: float = 0.5
+    """Fallen-start fraction for the ``play.py --video`` training-spec clip, applied
+    EXPLICITLY via ``fallen_frac_override`` (P2-9: the difficulty curriculum is absent in
+    playback, and the baked pose weights are folded-only -- 0.5 = the post-curriculum
+    training value)."""
     record_training_video: bool = False
     """When True, record live training videos from a SINGLE world-space viewer camera
     (one ``KitVisualizer`` with ``origin_type="world"`` that frames the grid centre, so a
@@ -561,18 +603,23 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
         # keep the ground material as the sim default physics material
         self.sim.physics_material = self.scene.ground.spawn.physics_material
 
-        # optional: velocity-command tracking (phase 2)
-        if self.use_velocity_commands:
-            self.commands = CrawlCommandsCfg()
-            # switch the velocity-tracking rewards onto the command
-            self.rewards.forward_velocity.params["command_name"] = "base_velocity"
-            self.rewards.overspeed.params["command_name"] = "base_velocity"
-        else:
-            self.commands = None
+        # yaw-rate command term (always on; the actor's single command input)
+        self.commands = CrawlCommandsCfg()
+        self.commands.yaw_rate_cmd.resampling_time_range = tuple(self.yaw_rate_resample_range)
 
-        # optional: mid-episode resampled commanded heading (CommandManager-native;
-        # mdp.get_ref_dir prefers this term over the frozen reset_start_pose draw)
-        self._ensure_crawl_heading_term()
+        # yaw_rate_tracking filters are env tunables (P2-4/P2-6), injected from the fields
+        # above so they are overridable without editing the reward defaults
+        self.rewards.yaw_rate_tracking.params = {
+            "sigma": 0.1,
+            "tau_r": self.yaw_rate_ema_tau_s,
+            "yaw_mask_s": self.yaw_mask_s,
+        }
+
+        # diagnostic re-enable of the removed position box (P2-7 / §A.11)
+        if self.use_box_termination:
+            self.terminations.out_of_bounds = DoneTerm(
+                func=mdp.out_of_bounds, params={"x_range": 2.5, "y_range": 1.5}
+            )
 
         # optional: gait clock (set to None so the obs manager skips it; the group
         # iterates instance __dict__ and ignores None terms)
@@ -580,10 +627,19 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
             self.observations.policy.gait_clock = None
 
         # curriculum on/off
-        if not self.use_curriculum:
+        if self.use_curriculum:
+            # P2-9: the fallen-start fraction comes ONLY from the difficulty curriculum;
+            # fail loudly at env creation if it is missing (pitfall X1)
+            assert self.curriculum.difficulty is not None, (
+                "use_curriculum=True requires the difficulty curriculum term (fallen starts "
+                "come exclusively from env.extras['fallen_frac'] -- pitfall X1)"
+            )
+        else:
+            self.curriculum.crawl_metrics = None
             self.curriculum.v_target = None
             self.curriculum.friction_scale = None
             self.curriculum.difficulty = None
+            self.curriculum.yaw_rate_stage = None
             self.events.apply_friction_scale = None
             # without curriculum the v_target is constant at its final value
             self.v_target_start = self.v_target
@@ -598,27 +654,6 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
         if self.record_training_video or video_flags.training_video_enabled or video_flags.play_video_training_spec:
             self.record_training_video = True
             self._setup_training_video()
-
-    def _ensure_crawl_heading_term(self) -> None:
-        """Idempotently wire the ``crawl_heading`` command term from ``use_dynamic_heading``.
-
-        The Hydra composition path (``update_from_dict``) writes ``use_dynamic_heading=true``
-        onto an ALREADY-constructed cfg and never re-runs ``__post_init__``, so the env
-        entry points (``CrawlRLEnv``/``CrawlPlayRLEnv``) and ``play_mode`` call this again
-        right before the config is consumed.
-        """
-        if not getattr(self, "use_dynamic_heading", False):
-            return
-        if self.commands is not None and getattr(self.commands, "crawl_heading", None) is not None:
-            return
-        if self.commands is None:
-            self.commands = CrawlCommandsCfg(base_velocity=None)
-        self.commands.crawl_heading = mdp.UniformCrawlHeadingCommandCfg(
-            resampling_time_range=self.heading_resample_range,
-            heading_range=self.heading_range,
-            curriculum_gate_frac=self.heading_curriculum_frac,
-            debug_vis=False,
-        )
 
     @staticmethod
     def _look_at_pose(
@@ -779,9 +814,10 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
           running, ``env.extras`` never gains a ``push_scale`` key, so
           :func:`mdp.disturb_all_bodies` falls back to scale 1.0 (the post-curriculum
           training value),
-        * 50% fallen starts: without ``env.extras["fallen_frac"]`` (difficulty curriculum
-          removed) :func:`mdp.reset_start_pose` uses the baked training ``pose_weights``
-          (0.5, 0.25, 0.25), and spawn noise/offset/yaw randomization stay as in training,
+        * 50% fallen starts: the difficulty curriculum is removed with the rest of the
+          curriculum, so the fraction is set EXPLICITLY via ``fallen_frac_override``
+          (P2-9 -- the baked pose weights are folded-only and must never silently carry
+          the fallen mix), and spawn noise/offset/yaw randomization stay as in training,
         * per-env ground-friction randomization stays at the training range.
 
         The disturbance/spawn/friction values are re-applied from a fresh
@@ -793,6 +829,9 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
         training_events = CrawlEventsCfg()
         self.events.randomize_ground_friction.params = dict(training_events.randomize_ground_friction.params)
         self.events.reset_start_pose.params = dict(training_events.reset_start_pose.params)
+        # explicit fallen-start fraction for the clip (P2-9: never rely on the removed
+        # baked fallback; the training-spec clip wants the post-curriculum 50%)
+        self.events.reset_start_pose.params["fallen_frac_override"] = self.play_video_fallen_frac
         if self.events.push_robot is None:
             self.events.push_robot = training_events.push_robot
         # programmable disturbance scaling for the play clip (1.0 = exactly the training
@@ -814,16 +853,18 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
         clip matches a training overview video (see
         :attr:`zombie_crawl.tasks.manager_based.crawl.video_flags.play_video_training_spec`).
         """
-        # wire the command term BEFORE pinning (Hydra may have set use_dynamic_heading
-        # post-construction, and play_mode is the last hook before the cfg is consumed)
-        self._ensure_crawl_heading_term()
         super().play_mode()
-        # no curriculum: constant v_target at its final value
+        # no curriculum: constant v_target at its final value; dials frozen at their
+        # post-curriculum values (no crawl_metrics scoring, no friction rescaler, no
+        # yaw-rate stage ladder)
+        self.curriculum.crawl_metrics = None
         self.curriculum.v_target = None
         self.curriculum.friction_scale = None
         self.curriculum.difficulty = None
+        self.curriculum.yaw_rate_stage = None
         self.events.apply_friction_scale = None
         self.v_target_start = self.v_target
+        self._setup_play_commands()
         if video_flags.play_video_training_spec:
             # training-spec play clip: keep the full population + disturbance + fallen starts
             self._apply_training_video_play_spec()
@@ -842,18 +883,30 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
         # in at full training strength; red overlay arrows then track the applied wrenches)
         if not video_flags.play_disturbance_enabled:
             self.events.push_robot = None
-        # deterministic eval: one commanded heading per episode (no mid-episode resample;
-        # the CommandManager still redraws it per episode, like the frozen ref_yaw draw).
-        # scripts/play.py --dynamic_heading opts back into live mid-episode resampling
-        # (the curriculum gate reads no difficulty in play mode -> always unlocked).
-        if not video_flags.play_dynamic_heading:
-            self._pin_heading_resampling()
 
-    def _pin_heading_resampling(self) -> None:
-        """Hold each commanded heading for a full episode (deterministic eval/playback)."""
-        if self.commands is not None and getattr(self.commands, "crawl_heading", None) is not None:
+    def _setup_play_commands(self) -> None:
+        """Deterministic yaw-rate command behaviour for play/eval (P2-13).
+
+        Default playback: one commanded rate per episode (resample pinned to the episode
+        length; the CommandManager still redraws it per episode), with the stage dial
+        force-opened via ``play_yaw_rate_max`` so those draws are non-zero without the
+        curriculum. ``play.py --yaw_rate <rad/s>`` instead pins a constant command for all
+        envs (the term ignores resampling entirely while pinned).
+        """
+        if self.commands is None or self.commands.yaw_rate_cmd is None:
+            return
+        if video_flags.play_yaw_rate is not None:
+            # constant command for all envs: CrawlRLEnv.__init__ calls term.pin(...) from
+            # this flag; stochastic draws are irrelevant then
+            return
+        self.play_yaw_rate_max = self.yaw_rate_max_final
+        self._pin_yaw_resampling()
+
+    def _pin_yaw_resampling(self) -> None:
+        """Hold each commanded yaw rate for a full episode (deterministic eval/playback)."""
+        if self.commands is not None and getattr(self.commands, "yaw_rate_cmd", None) is not None:
             t = self.episode_length_s
-            self.commands.crawl_heading.resampling_time_range = (t, t)
+            self.commands.yaw_rate_cmd.resampling_time_range = (t, t)
 
 
 @configclass
@@ -878,9 +931,10 @@ class CrawlPlayEnvCfg(CrawlEnvCfg):
         if video_flags.play_video_training_spec:
             self.num_envs = self.play_video_num_envs
         super().__post_init__()
+        self._setup_play_commands()
         if video_flags.play_video_training_spec:
-            # keep the scene identical to a training run (full disturbance, 50% fallen
-            # starts, spawn/friction randomization) -- only the curriculum is frozen
+            # keep the scene identical to a training run (full disturbance, explicit 50%
+            # fallen starts, spawn/friction randomization) -- only the curriculum is frozen
             self._apply_training_video_play_spec()
             self.observations.policy.enable_corruption = False
             return
@@ -894,16 +948,12 @@ class CrawlPlayEnvCfg(CrawlEnvCfg):
         # deterministic eval: no live disturbance (--disturbance opts back in, see play_mode)
         if not video_flags.play_disturbance_enabled:
             self.events.push_robot = None
-        # deterministic eval: one commanded heading per episode
-        self._pin_heading_resampling()
         # remove observation corruption
         self.observations.policy.enable_corruption = False
 
     def play_mode(self):
         # deterministic by construction; the training-spec variant was configured in
-        # __post_init__ (video_flags.play_video_training_spec). Still wire + pin the
-        # heading term for the Hydra path (flags set after __post_init__ already ran).
-        # scripts/play.py --dynamic_heading keeps the mid-episode resampling alive.
-        self._ensure_crawl_heading_term()
-        if not (video_flags.play_video_training_spec or video_flags.play_dynamic_heading):
-            self._pin_heading_resampling()
+        # __post_init__ (video_flags.play_video_training_spec). Still re-apply the play
+        # command setup for the Hydra path (video_flags may be set after __post_init__
+        # already ran -- e.g. scripts/play.py --yaw_rate, which pins the term constant).
+        self._setup_play_commands()

@@ -3,16 +3,24 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Curriculum terms for the zombie crawl task.
+"""Curriculum terms for the zombie crawl task (phase 2).
 
-The curriculum advances two knobs, both stored on the environment:
+The curriculum advances five dials, all consumed elsewhere:
 
-* ``env.v_target`` -- per-environment forward velocity target (tensor, shape (num_envs,)).
-* ``env.extras["friction_scale"]`` -- multiplier applied on top of the per-env friction
-  sample; starts above 1 (grippier) and decays to 1.
+* ``env.v_target`` -- per-environment forward velocity target (tensor, (num_envs,)).
+* ``env.extras["friction_scale"]`` -- extra friction multiplier, decays 1.5 -> 1.0.
+* ``env.extras["difficulty"]`` (+ ``fallen_frac`` over [0, 0.5], ``push_scale`` over
+  [0.5, 1]) -- recovery/robustness staging.
+* ``env.extras["yaw_rate_max"]`` -- the yaw-rate command stage dial (P2-12): 0 -> 0.10
+  -> up to 0.30 rad/s, monotonic, gated on difficulty and steering success.
 
-Both advance when the mean forward velocity (and mean episode length) pass thresholds,
-so a weak policy gets an easier task and the difficulty creeps up as it learns.
+The phase-2 gates read the *success metrics* (:mod:`.metrics`), not the removed position
+box: ``escape`` became ``crawl_success`` (upright-start episodes only -- pitfall X2), and
+``mean_vx`` is now the claw-axis-projected velocity EMA (pitfall X3: velocity is
+instantaneous, so projecting on the rotating claw axis is harmless and needs no
+re-anchoring). The curriculum terms run at the START of the reset step, before the reset
+events re-initialize the per-episode accumulators (verified against the installed Isaac
+Lab: ``ManagerBasedRLEnv._reset_idx`` calls ``curriculum_manager.compute`` first).
 """
 
 from __future__ import annotations
@@ -26,54 +34,45 @@ if TYPE_CHECKING:
     # ``pxr`` before SimulationApp is created, which breaks Kit extension loading
     from isaaclab.envs import ManagerBasedEnv
 
+from . import metrics
 from .rewards import get_v_target
 
 
 def _proj_vel_ema(env: "ManagerBasedEnv", tau: float = 2.0) -> float:
-    """Population mean of an EMA (~``tau`` s) of the reference-projected base velocity.
+    """Population mean of an EMA (~``tau`` s) of the CLAW-axis-projected base velocity.
 
-    Both curriculum gates used to read ONE instantaneous frame of velocity; a flailing
-    population's instantaneous mean spikes on every stand-up/topple kick and advanced the
-    difficulty on bogus evidence. A short EMA gates on sustained forward motion instead.
+    Gating on instantaneous velocity let a flailing population's stand-up/topple kicks
+    advance difficulty on bogus evidence; the EMA gates on sustained forward motion. The
+    projection is instantaneous, so rotating the claw axis between steps is harmless
+    (pitfall X3) and -- unlike the removed world-frame command axis -- no resample
+    re-anchoring is needed.
     """
-    from .rewards import get_ref_dir
+    from .rewards import get_claw_dir
 
     dt = float(env.step_dt)
     v = env.scene["robot"].data.root_lin_vel_w.torch
-    cos_ref, sin_ref = get_ref_dir(env)
-    v_proj = v[:, 0] * cos_ref + v[:, 1] * sin_ref
+    cos_u, sin_u = get_claw_dir(env)
+    v_proj = v[:, 0] * cos_u + v[:, 1] * sin_u
     ema = getattr(env, "zombie_v_ema", None)
     if ema is None or ema.shape[0] != env.num_envs:
         env.zombie_v_ema = v_proj.clone()
         return float(env.zombie_v_ema.mean())
     ema += (v_proj - ema) * min(1.0, dt / tau)
-    # a mid-episode command resample changes the projection axis for those envs; the
-    # accumulated EMA mixes the old and new axes -> restart it there instead
-    from .rewards import crawl_heading_resample_flag
-
-    resampled = crawl_heading_resample_flag(env)
-    if resampled is not None and resampled.any():
-        ema[resampled] = v_proj[resampled]
     return float(env.zombie_v_ema.mean())
 
 
-def _escape_rate(env: "ManagerBasedEnv", term: str = "out_of_bounds") -> float:
-    """Fraction of the population whose last episode ended by escaping the box.
+def crawl_metrics_curriculum(env: ManagerBasedEnv, env_ids: torch.Tensor | slice) -> dict:
+    """Success-metrics term (P2-10): scores the just-finished episodes and logs the EMAs.
 
-    This is the *real* "it can crawl" signal: the robot reaches the wall and leaves the
-    play field. We read the value the TerminationManager already logs every step
-    (``Episode_Termination/<term>``, the mean last-episode activation over all envs).
-
-    Why not mean episode length: a good crawler escapes the box *early*, so its episodes
-    get SHORT -- gating progress on "survive a long time" is self-defeating, because
-    success actively prevents the gate from passing (this is what froze the v_target ladder).
+    Runs at the start of every reset step (before the reset events), reads the per-episode
+    accumulators :mod:`.metrics` maintained during the episode, folds them into the
+    population EMAs (``crawl_success`` on upright starts, ``recovery_success`` +
+    ``time_to_upright`` on fallen starts, ``steer_success`` per command segment), and
+    returns everything (plus W2/W3 watch diagnostics) so the CurriculumManager logs each
+    value as its own TensorBoard card.
     """
-    log = env.extras.get("log", {}) if hasattr(env, "extras") else {}
-    val = log.get(f"Episode_Termination/{term}", 0.0)
-    try:
-        return float(val)
-    except (TypeError, ValueError):
-        return 0.0
+    metrics.score_finished_episodes(env, env_ids)
+    return metrics.metrics_snapshot(env)
 
 
 def v_target_curriculum(
@@ -83,15 +82,14 @@ def v_target_curriculum(
     v_final: float = 0.10,
     step_size: float = 0.005,
     min_fraction: float = 0.6,
-    min_escape: float = 0.5,
+    min_crawl: float = 0.5,
     check_interval: int = 100,
 ) -> float:
     """Advance ``env.v_target`` toward ``v_final`` as the population learns to crawl.
 
-    Gate: sustained forward speed (``mean_vx``) plus a sustained box-escape rate
-    (``out_of_bounds >= min_escape``). We deliberately do NOT gate on episode length --
-    see :func:`_escape_rate`; a good crawler escapes early, so long episodes are the wrong
-    success signal and froze the ladder at ``v_start``.
+    Gate (P2-11): sustained claw-axis forward speed (``mean_v_c EMA > min_fraction *
+    v_target``) AND ``crawl_success >= min_crawl`` (upright-start episodes only). The
+    phase-1 box-escape gate is gone: ``crawl_success`` is the real "it can crawl" signal.
     """
     if "zombie_curriculum_step" not in env.extras:
         env.extras["zombie_curriculum_step"] = 0
@@ -102,12 +100,11 @@ def v_target_curriculum(
     if env.extras["zombie_curriculum_step"] % check_interval != 0:
         return float(v_target[0])
 
-    mean_vx = _proj_vel_ema(env)  # sustained speed along the reference (jaw) axis
-    escape = _escape_rate(env)  # fraction escaping the box last step
-    if mean_vx > min_fraction * v_target[0] and escape >= min_escape:
-        if not getattr(env.cfg, "use_velocity_commands", False):
-            env.v_target = torch.clamp(env.v_target + step_size, max=v_final)
-            v_target = env.v_target
+    mean_v_c = _proj_vel_ema(env)  # sustained speed along the claw axis
+    crawl = metrics.get_metric(env, "crawl_success")
+    if mean_v_c > min_fraction * v_target[0] and crawl >= min_crawl:
+        env.v_target = torch.clamp(env.v_target + step_size, max=v_final)
+        v_target = env.v_target
     return float(v_target[0])
 
 
@@ -118,13 +115,13 @@ def friction_curriculum(
     scale_final: float = 1.0,
     step_size: float = 0.05,
     min_fraction: float = 0.6,
-    min_escape: float = 0.5,
+    min_crawl: float = 0.5,
     check_interval: int = 200,
 ) -> float:
     """Decay the extra friction multiplier toward 1.0 as the population learns to crawl.
 
-    Same escape-rate gate as ``v_target_curriculum`` -- NOT episode length (a good crawler
-    escapes early, so long episodes are the wrong success signal; see :func:`_escape_rate`).
+    Same success gate as ``v_target_curriculum`` (P2-11): claw-axis speed EMA +
+    ``crawl_success``.
     """
     if "zombie_friction_step" not in env.extras:
         env.extras["zombie_friction_step"] = 0
@@ -137,9 +134,9 @@ def friction_curriculum(
     if env.extras["zombie_friction_step"] % check_interval != 0:
         return float(scale)
 
-    mean_vx = _proj_vel_ema(env)  # sustained speed along the reference (jaw) axis
-    escape = _escape_rate(env)  # fraction escaping the box last step
-    if mean_vx > min_fraction * get_v_target(env).mean() and escape >= min_escape:
+    mean_v_c = _proj_vel_ema(env)
+    crawl = metrics.get_metric(env, "crawl_success")
+    if mean_v_c > min_fraction * get_v_target(env).mean() and crawl >= min_crawl:
         scale = torch.clamp(scale - step_size, min=scale_final)
         env.extras["friction_scale"] = scale
     return float(scale)
@@ -148,11 +145,10 @@ def friction_curriculum(
 def difficulty_curriculum(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor,
-    start_after_v: float = 0.09,
     step_size: float = 0.05,
     check_interval: int = 100,
     min_fraction: float = 0.6,
-    min_escape: float = 0.5,
+    min_crawl: float = 0.5,
     fallen_max: float = 0.5,
     push_max: float = 1.0,
     push_start_frac: float = 0.5,
@@ -163,25 +159,22 @@ def difficulty_curriculum(
     consumed elsewhere:
 
     * ``env.extras["fallen_frac"]`` -- fraction of resets that start toppled (on_side/face_down),
-      read by :func:`reset_start_pose` to recompute its pose_weights.
+      read by :func:`reset_start_pose` to recompute its pose_weights (P2-9: fallen starts come
+      ONLY from this key -- never from the baked weights).
     * ``env.extras["push_scale"]`` -- multiplier on the external-force disturbance, read by
       :func:`disturb_all_bodies`.
 
-    Staging: the fragile forward gait must appear FIRST. Onset is gated on a sustained
-    box-escape rate (``out_of_bounds >= min_escape``) -- the true "it reliably crawls out"
-    signal -- instead of the old ``v_target >= start_after_v`` gate, which could never fire
-    because the v_target ladder itself was stuck (see :func:`_escape_rate`).
+    Staging: the fragile forward gait must appear FIRST. Onset is gated on
+    ``crawl_success >= min_crawl`` (P2-11; computed on upright-start episodes only --
+    pitfall X2). Once difficulty has begun (> 0), it keeps ramping while the population
+    still crawls forward (``mean_v_c EMA > min_fraction * v_now``); re-checking onset
+    would lock the ramp at its first step, because fallen spawns and pushes deliberately
+    lower the success rate. The dial never moves backward.
 
-    Once difficulty has begun (> 0), it keeps ramping as long as the population still crawls
-    forward (``mean_vx > min_fraction * v_target``). We intentionally do NOT re-check the escape
-    rate after onset: fallen spawns and pushes deliberately lower the escape rate, so re-checking
-    it would lock the ramp at its first step. ``mean_vx`` is the self-limiting signal -- if the
-    robot can no longer make forward progress under the difficulty, ramping pauses.
-
-    Within Phase 2 the two sub-channels are STAGGERED by ``push_start_frac``: the robot learns to
-    get UP from fallen spawns first (``fallen_frac`` fills over ``difficulty`` in ``[0, f]``), and
-    only once it can do that does the external disturbance turn on (``push_scale`` fills over
-    ``difficulty`` in ``[f, 1]``). Don't shove the robot until it can already recover on its own.
+    Within phase 2 the two sub-channels are STAGGERED by ``push_start_frac``: the robot
+    learns to get UP from fallen spawns first (``fallen_frac`` fills over ``difficulty`` in
+    ``[0, f]``), and only once it can do that does the external disturbance turn on
+    (``push_scale`` fills over ``difficulty`` in ``[f, 1]``).
     """
     if "difficulty" not in env.extras:
         env.extras["difficulty"] = 0.0
@@ -212,18 +205,93 @@ def difficulty_curriculum(
 
     v_now = float(get_v_target(env).mean())
     started = float(env.extras["difficulty"]) > 0.0
-    escape = _escape_rate(env)
-    # onset: only begin turning up difficulty once the population reliably crawls out of the box
-    if not started and escape < min_escape:
+    crawl = metrics.get_metric(env, "crawl_success")
+    # onset: only begin turning up difficulty once upright-start episodes reliably crawl
+    if not started and crawl < min_crawl:
         return _state()
 
-    mean_vx = _proj_vel_ema(env)
+    mean_v_c = _proj_vel_ema(env)
     # continuation: keep ramping while the population still makes forward progress under the difficulty
-    if mean_vx > min_fraction * v_now:
+    if mean_v_c > min_fraction * v_now:
         d = min(1.0, env.extras["difficulty"] + step_size)
         env.extras["difficulty"] = d
         # staggered: fallen spawns fill over [0, f], pushes only fill over [f, 1]
         f = min(max(push_start_frac, 1e-6), 1.0 - 1e-6)
         env.extras["fallen_frac"] = fallen_max * min(1.0, d / f)
         env.extras["push_scale"] = push_max * max(0.0, min(1.0, (d - f) / (1.0 - f)))
+    return _state()
+
+
+def yaw_rate_stage_curriculum(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor,
+    unlock_difficulty: float = 0.75,
+    stage1_rate: float = 0.10,
+    step_size: float = 0.05,
+    min_steer: float = 0.7,
+    check_interval: int = 100,
+) -> dict:
+    """Yaw-rate command stages (P2-12), stored on ``env.extras["yaw_rate_max"]``.
+
+    ====  ==========================  ==========================================
+    St  dial                          unlock
+    ====  ==========================  ==========================================
+    0     0 (all commands 0)          start
+    1     ``stage1_rate`` (0.10)      ``difficulty >= unlock_difficulty`` (0.75,
+                                      the point phase 1 used for its dynamic heading)
+    2     +step_size per check to     ``steer_success >= min_steer`` (0.7), checked
+        ``env.cfg.yaw_rate_max_final`` every ``check_interval`` curriculum calls
+        (0.30 rad/s provisional)
+    ====  ==========================  ==========================================
+
+    Monotonic -- a dial never moves backward. ``env.cfg.yaw_rate_stage_lock`` (debug,
+    read live so Hydra can set it post-construction) forces a stage: 0 keeps steering
+    locked off (R1), >=1 jumps straight to that stage ignoring the gates (single-stage
+    debugging). The reachable maximum is discovered by RL: the final cap is provisional.
+    """
+    if "yaw_rate_max" not in env.extras:
+        env.extras["yaw_rate_max"] = 0.0
+        env.extras["yaw_rate_stage"] = 0
+        env.extras["zombie_yaw_stage_step"] = 0
+        import zombie_crawl
+
+        print(
+            f"[CURRICULUM] yaw_rate_stage term ACTIVE -- zombie_crawl imported from: "
+            f"{zombie_crawl.__file__}",
+            flush=True,
+        )
+    env.extras["zombie_yaw_stage_step"] += 1
+
+    def _state() -> dict:
+        return {
+            "yaw_rate_max": float(env.extras["yaw_rate_max"]),
+            "stage": float(env.extras["yaw_rate_stage"]),
+        }
+
+    if env.extras["zombie_yaw_stage_step"] % check_interval != 0:
+        return _state()
+
+    cap_final = float(getattr(env.cfg, "yaw_rate_max_final", 0.30))
+    lock = getattr(env.cfg, "yaw_rate_stage_lock", None)
+    if lock is not None:
+        # single-stage debug: force the dial to the requested stage, ignore the gates
+        stage = int(lock)
+        env.extras["yaw_rate_stage"] = stage
+        env.extras["yaw_rate_max"] = 0.0 if stage <= 0 else (stage1_rate if stage == 1 else cap_final)
+        return _state()
+
+    stage = int(env.extras["yaw_rate_stage"])
+    if stage == 0:
+        if float(env.extras["difficulty"]) >= unlock_difficulty:
+            stage = 1
+            env.extras["yaw_rate_max"] = stage1_rate
+    if stage == 1:
+        if metrics.get_metric(env, "steer_success") >= min_steer:
+            stage = 2
+    if stage >= 2:
+        stage = 2
+        # climb toward the provisional cap only while the population actually tracks
+        if metrics.get_metric(env, "steer_success") >= min_steer:
+            env.extras["yaw_rate_max"] = min(cap_final, float(env.extras["yaw_rate_max"]) + step_size)
+    env.extras["yaw_rate_stage"] = stage
     return _state()

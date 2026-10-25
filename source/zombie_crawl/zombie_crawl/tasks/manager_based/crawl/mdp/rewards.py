@@ -9,6 +9,16 @@ Convention: all functions return a tensor of shape ``(num_envs,)``. The environm
 must expose ``env.v_target`` (tensor, shape ``(num_envs,)``) -- the current forward
 velocity target -- which is created in ``CrawlEnvCfg.__post_init__`` and optionally
 driven by the curriculum.
+
+Phase 2 (yaw-rate command):
+
+* all directional terms are scored on the CLAW axis (``get_claw_dir``), never on a
+  world-frame command direction -- no term projects an absolute world position onto a
+  rotating axis (pitfall X3);
+* the claw heading rate ``r`` (``env.zombie_r_ema``) is a simulation-only measurement
+  maintained by :func:`_update_claw_heading_rate`, which runs exactly once per env step
+  inside :func:`yaw_rate_tracking` (every consumer reads it after that); it is NEVER an
+  actor input and is never computed on the robot.
 """
 
 from __future__ import annotations
@@ -34,62 +44,36 @@ def _wrap_to_pi(x: torch.Tensor) -> torch.Tensor:
     return torch.atan2(torch.sin(x), torch.cos(x))
 
 
-def crawl_heading_command(env: ManagerBasedEnv) -> torch.Tensor | None:
-    """Per-env commanded heading [rad] from the ``crawl_heading`` CommandManager term, or
-    ``None`` when the term is not active (``use_dynamic_heading`` off -> v0 frozen mode)."""
+def yaw_rate_command(env: ManagerBasedEnv) -> torch.Tensor:
+    """Per-env commanded yaw rate [rad/s] from the ``yaw_rate_cmd`` CommandManager term."""
     cm = getattr(env, "command_manager", None)
-    if cm is not None and "crawl_heading" in cm.active_terms:
-        return cm.get_command("crawl_heading")[:, 0]
+    if cm is not None and "yaw_rate_cmd" in cm.active_terms:
+        return cm.get_command("yaw_rate_cmd")[:, 0]
+    return torch.zeros(env.num_envs, device=env.device)
+
+
+def yaw_rate_resample_flag(env: ManagerBasedEnv) -> torch.Tensor | None:
+    """Bool mask (num_envs,) of envs whose yaw-rate command changed on the latest command
+    ``compute()`` (mid-episode resample), or ``None`` when the term is not active.
+
+    The stateful claw-rate filter restarts its post-resample mask timer for these envs.
+    Episode resets are re-anchored separately (``mdp.reset_start_pose`` sets the reseed
+    flag), because the CommandManager's reset resample is not observable here (the flag
+    is cleared by the same step's ``compute()``).
+    """
+    cm = getattr(env, "command_manager", None)
+    if cm is not None and "yaw_rate_cmd" in cm.active_terms:
+        return cm.get_term("yaw_rate_cmd").just_resampled
     return None
 
 
-def crawl_heading_resample_flag(env: ManagerBasedEnv) -> torch.Tensor | None:
-    """Bool mask (num_envs,) of envs whose commanded heading changed THIS step (mid-episode
-    resample or episode reset), or ``None`` when the command term is not active.
-
-    Stateful terms that accumulate displacement/velocity along the command axis must
-    re-anchor for these envs, otherwise two different axes get averaged together.
-    """
-    cm = getattr(env, "command_manager", None)
-    if cm is not None and "crawl_heading" in cm.active_terms:
-        return cm.get_term("crawl_heading").just_resampled
-    return None
-
-
-def get_ref_dir(env: ManagerBasedEnv) -> tuple[torch.Tensor, torch.Tensor]:
-    """(cos, sin) of each env's commanded heading.
-
-    The command is uniform +-180 deg, INDEPENDENT of the spawn facing. With
-    ``use_dynamic_heading`` off it is drawn once per episode by ``reset_start_pose``
-    (``env.zombie_ref_yaw``, frozen); with the flag on the ``crawl_heading`` command term
-    owns it and RESAMPLES it mid-episode per env (staggered every
-    ``heading_resample_range`` seconds). All directional rewards/curricula project world
-    velocities onto it; the ``heading_error_wrist`` observation shows the actor where the
-    claw points relative to it. It is a commanded direction, not a heading feedback loop --
-    it never moves to follow the robot, so turning cannot farm it. Falls back to world +X
-    before the first reset.
-    """
-    yaw = crawl_heading_command(env)
-    if yaw is None:
-        yaw = getattr(env, "zombie_ref_yaw", None)
-    if yaw is None or yaw.shape[0] != env.num_envs:
-        ones = torch.ones(env.num_envs, device=env.device)
-        return ones, torch.zeros_like(ones)
-    return torch.cos(yaw), torch.sin(yaw)
-
-
-def get_claw_dir(
+def _claw_yaw_and_valid(
     env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=("wrist",))
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """(cos, sin) of the base->wrist (claw) arrow heading -- the axis *forward velocity* is scored on.
+    """(psi, valid): yaw [rad] of the base->wrist (claw) arrow and its validity mask.
 
-    This is the locomotion frame: the robot must drag its base toward wherever the claw points, so
-    the claw leads and a backward slide scores negative. It is the SAME horizontal base->wrist arrow
-    ``wrist_pointing_error`` (reward) and ``heading_error_wrist`` (observation) measure, so the actor
-    is steered by exactly what the reward pays. When the arm is curled the arrow degenerates, so it
-    falls back to the base's own forward axis (base -Y = ``yaw - pi/2``), which is always defined and
-    cannot be farmed by tucking the arm. Distinct from ``get_ref_dir`` (the world command), which is
-    kept only for net *progress* toward the goal and the stall/curriculum gates.
+    Valid means the horizontal arrow is longer than 0.01 m; when invalid the arrow
+    degenerates (arm curled) and consumers fall back to the base axis ``yaw - pi/2``.
     """
     asset = env.scene[asset_cfg.name]
     wrist_ids = getattr(env, "zombie_wrist_body_ids", None)
@@ -97,7 +81,7 @@ def get_claw_dir(
         ids, _names = asset.find_bodies(list(asset_cfg.body_names), as_proxy=True)
         wrist_ids = ids.torch.reshape(-1)
         if wrist_ids.numel() == 0:
-            raise ValueError(f"get_claw_dir: no body matching {asset_cfg.body_names}")
+            raise ValueError(f"claw arrow: no body matching {asset_cfg.body_names}")
         env.zombie_wrist_body_ids = wrist_ids
     wrist = asset.data.body_pos_w.torch[:, wrist_ids[0]]
     base = asset.data.root_pos_w.torch
@@ -109,6 +93,22 @@ def get_claw_dir(
     fallback_yaw = yaw - 0.5 * math.pi
     valid = torch.hypot(dx, dy) > 0.01
     claw_yaw = torch.where(valid, arrow_yaw, fallback_yaw)
+    return claw_yaw, valid
+
+
+def get_claw_dir(
+    env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=("wrist",))
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """(cos, sin) of the base->wrist (claw) arrow heading -- the axis *forward velocity* is scored on.
+
+    This is the locomotion frame: the robot must drag its base toward wherever the claw points, so
+    the claw leads and a backward slide scores negative. When the arm is curled the arrow degenerates,
+    so it falls back to the base's own forward axis (base -Y = ``yaw - pi/2``), which is always defined
+    and cannot be farmed by tucking the arm. Under the yaw-rate command policy every directional
+    reward/termination/curriculum term projects on this axis; there is no world-frame command
+    direction anymore (the removed ``get_ref_dir``).
+    """
+    claw_yaw, _valid = _claw_yaw_and_valid(env, asset_cfg)
     return torch.cos(claw_yaw), torch.sin(claw_yaw)
 
 
@@ -129,82 +129,107 @@ def upright_bonus(
     return torch.clamp(-grav[:, 2], min=0.0, max=1.0)
 
 
+def flatness_gate(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+    """Posture gate ``up``: ``clamp(1 - (g_x^2 + g_y^2), 0, 1)`` from projected gravity."""
+    grav = env.scene[asset_cfg.name].data.projected_gravity_b.torch
+    tilt = grav[:, 0] * grav[:, 0] + grav[:, 1] * grav[:, 1]
+    return torch.clamp(1.0 - tilt, min=0.0, max=1.0)
+
+
 def get_v_target(env: ManagerBasedEnv) -> torch.Tensor:
     """Per-environment forward velocity target (lazily initialized on ``env.v_target``).
 
     With the curriculum enabled it starts at ``cfg.v_target_start`` and eases toward
-    ``cfg.v_target``; otherwise it is constant at ``cfg.v_target``. If velocity-command
-    tracking is enabled (phase-2 stub) the commanded vx replaces the fixed target.
+    ``cfg.v_target``; otherwise it is constant at ``cfg.v_target``.
     """
     if not hasattr(env, "v_target") or env.v_target is None:
         cfg = env.cfg
         start = cfg.v_target_start if getattr(cfg, "use_curriculum", False) else cfg.v_target
         # Isaac Lab 3.0: ManagerBasedRLEnv has no ``unwrapped`` property; use num_envs directly
         env.v_target = torch.full((env.num_envs,), start, device=env.device, dtype=torch.float32)
-    if getattr(env.cfg, "use_velocity_commands", False) and env.command_manager is not None:
-        cmd = env.command_manager.get_command("base_velocity")
-        return cmd[:, 0]
     return env.v_target
+
+
+def claw_heading_rate(env: ManagerBasedEnv) -> torch.Tensor:
+    """The claw heading rate ``r`` [rad/s]: per-env EMA buffer (read-only accessor).
+
+    The value is maintained by :func:`_update_claw_heading_rate`, which runs exactly once
+    per env step inside :func:`yaw_rate_tracking`. Consumers (critic observation, metrics,
+    curriculum, evaluation) read this buffer after the reward step. It is a
+    SIMULATION-ONLY measurement: never an actor input, never computed on the robot.
+    """
+    r = getattr(env, "zombie_r_ema", None)
+    if r is None or r.shape[0] != env.num_envs:
+        r = torch.zeros(env.num_envs, device=env.device)
+        env.zombie_r_ema = r
+    return r
+
+
+def _update_claw_heading_rate(env: ManagerBasedEnv, dt: float, tau_r: float) -> torch.Tensor:
+    """Advance the claw heading rate EMA one env step. MUST be called exactly once per step.
+
+    ``psi_t`` = claw heading (atan2 of the claw unit vector); ``dpsi = wrap(psi_t - psi_prev)``.
+    The increment is dropped (``dpsi = 0``) when the arrow validity flipped between the two
+    steps or ``|dpsi| > 0.5`` rad, so a curling arm snapping the arrow onto the base-axis
+    fallback cannot inject a spike. Then ``r += (dt / tau_r) * (dpsi / dt - r)``: the EMA
+    (``tau_r`` s, a fixed constant) averages out the base sway of the gait.
+
+    Reseed (``r = 0``, ``psi_prev = psi``, timer = 0) is requested by
+    ``mdp.reset_start_pose`` via ``env.zombie_rate_reseed``; the timer (only) restarts when
+    the command term reports ``just_resampled``.
+    """
+    psi, valid = _claw_yaw_and_valid(env)
+    r = getattr(env, "zombie_r_ema", None)
+    if r is None or r.shape[0] != env.num_envs:
+        env.zombie_r_ema = torch.zeros(env.num_envs, device=env.device)
+        env.zombie_psi_prev = psi.clone()
+        env.zombie_arrow_valid_prev = valid.clone()
+        env.zombie_time_since_resample = torch.zeros(env.num_envs, device=env.device)
+        env.zombie_rate_reseed = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        return env.zombie_r_ema
+    reseed = env.zombie_rate_reseed
+    if bool(reseed.any()):
+        env.zombie_r_ema[reseed] = 0.0
+        env.zombie_psi_prev[reseed] = psi[reseed]
+        env.zombie_arrow_valid_prev[reseed] = valid[reseed]
+        env.zombie_time_since_resample[reseed] = 0.0
+        reseed[reseed] = False
+    resampled = yaw_rate_resample_flag(env)
+    if resampled is not None and bool(resampled.any()):
+        env.zombie_time_since_resample[resampled] = 0.0
+    dpsi = _wrap_to_pi(psi - env.zombie_psi_prev)
+    bad = (valid != env.zombie_arrow_valid_prev) | (dpsi.abs() > 0.5)
+    dpsi = torch.where(bad, torch.zeros_like(dpsi), dpsi)
+    env.zombie_r_ema.add_((dpsi / max(dt, 1e-9) - env.zombie_r_ema) * min(1.0, dt / tau_r))
+    env.zombie_psi_prev = psi
+    env.zombie_arrow_valid_prev = valid
+    env.zombie_time_since_resample += dt
+    return env.zombie_r_ema
 
 
 def forward_velocity_exp(
     env: ManagerBasedEnv,
-    std: float | None = None,
-    command_name: str | None = None,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Forward-velocity reward: ``tanh(v_goal / v_target)``, posture-gated. "Move toward the goal."
+    """Forward-velocity reward: ``tanh(v_c / v_target)``, posture-gated. "Move along your claw."
 
-    ``v_goal`` is the base velocity projected onto the COMMANDED (goal) direction via
-    ``get_ref_dir``. This is the *locomotion* half of the goal: it pays only for advancing the base
-    toward where the command points, and scores negative for moving away. It is deliberately NOT
-    scored on the claw axis -- claw-axis speed let the robot bank the reward by crawling toward its
-    claw in whatever direction it happened to point (off-goal), and multiplying claw-speed by the
-    claw->command cosine let two negatives (claw pointed away *and* base moving opposite the claw)
-    multiply into a positive, so it learned to crawl tail-first (backward). Being an axis projection
-    onto a FIXED command direction, there is no sign that can flip into a fake positive.
+    ``v_c`` is the base horizontal velocity projected onto the CURRENT claw axis
+    (``get_claw_dir``). Phase 2 changed only the axis: measuring on the claw axis is what
+    makes the claw LEAD -- advancing against the arrow pays negative, so the tail-first
+    exploit the removed ``wrist_pointing`` term used to block is dominated directly by
+    this term (watch item W2 logs any residual backward crawling).
 
-    "The claw must LEAD (claw-first, not tail-first)" is enforced by a SEPARATE additive reward,
-    ``wrist_pointing`` (claw->command aim). The two are independent numbers added together:
-    max total needs BOTH the base advancing toward the goal AND the claw aimed there.
+    The forward half is multiplied by the flatness gate ``up`` (a toppled robot earns
+    nothing until level); the backward half stays the plain negative ``tanh``. ``tanh`` is
+    linear from rest (a gradient at a dead stop) -- a Gaussian bell has none and MUST NOT
+    replace it (pitfall X4).
     """
-    vx = _base_lin_vel_w(env, asset_cfg)[:, 0]
-    vy = _base_lin_vel_w(env, asset_cfg)[:, 1]
-    cos_ref, sin_ref = get_ref_dir(env)
-    vx = vx * cos_ref + vy * sin_ref  # velocity toward the commanded goal direction
-    target = get_v_target(env)
-    # posture gate: squared horizontal tilt of projected gravity (0 = upright/flat, 1 = sideways).
-    # A crawling base stays near-flat so this is ~1; a face-plant drives it toward 0, killing the
-    # reward for the topple itself. Only the forward half is gated (backward is always a penalty).
-    grav = env.scene[asset_cfg.name].data.projected_gravity_b.torch
-    tilt = grav[:, 0] * grav[:, 0] + grav[:, 1] * grav[:, 1]
-    up = torch.clamp(1.0 - tilt, min=0.0, max=1.0)
-    return torch.where(vx > 0, up * torch.tanh(vx / target), torch.tanh(vx / target))
-
-
-def forward_progress(
-    env: ManagerBasedEnv,
-    clip: float = 0.05,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """Per-step displacement along the reference (jaw) axis (clipped to ±clip).
-
-    Displacements larger than 3*clip are treated as episode-boundary jumps (the env was
-    reset between the two measurements) and zeroed.
-    """
-    asset = env.scene[asset_cfg.name]
-    pos = asset.data.root_pos_w.torch
-    cos_ref, sin_ref = get_ref_dir(env)
-    x = pos[:, 0] * cos_ref + pos[:, 1] * sin_ref  # position along the commanded heading
-    if not hasattr(env, "zombie_prev_x") or env.zombie_prev_x.shape[0] != x.shape[0]:
-        env.zombie_prev_x = x.clone()
-        return torch.zeros(env.num_envs, device=env.device)
-    dx = x - env.zombie_prev_x
-    env.zombie_prev_x = x.clone()
-    jump_mask = dx.abs() > 3.0 * clip
-    if jump_mask.any():
-        dx[jump_mask] = 0.0
-    return torch.clamp(dx, min=-clip, max=clip)
+    v = _base_lin_vel_w(env, asset_cfg)
+    cos_u, sin_u = get_claw_dir(env)
+    v_c = v[:, 0] * cos_u + v[:, 1] * sin_u
+    target = torch.clamp(get_v_target(env), min=1e-3)
+    up = flatness_gate(env, asset_cfg)
+    return torch.where(v_c > 0, up * torch.tanh(v_c / target), torch.tanh(v_c / target))
 
 
 def forward_progress_lpf(
@@ -213,37 +238,36 @@ def forward_progress_lpf(
     normalize: bool = True,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Exponentially filtered forward progress (displacement over a ``tau_s``-second window).
+    """Exponentially filtered forward progress along the claw axis (a ``tau_s``-second window).
 
     Same unit as velocity: filtered dx / filtered dt. Unlike the instantaneous per-step dx,
     it cannot be inflated by jerky oscillation (reciprocal motion averages to zero over the
     window), so it directly shapes the end-of-episode displacement the task is evaluated on.
 
-    With ``normalize`` the filtered command-axis speed is divided by ``v_target`` so this term sits
-    on the SAME [0,1]-ish scale as the normalized ``forward_velocity`` term. Previously it returned
-    raw m/s (~v_target~0.06), so at weight 1.0 it contributed ~0.06 and was numerically negligible
-    next to the (then claw-axis, now direction-aware) +2.5 speed term -- the policy had no real
-    gradient toward the goal via this lever.
+    Axis-free bookkeeping (pitfall X3): the per-step increment is
+    ``dx = (p_t - p_{t-1}) . u_t`` -- the base DISPLACEMENT dotted with the current claw
+    unit vector -- never the absolute world position (which carries the env-origin offset,
+    up to ~45 m at 4096 envs) projected on a rotating axis. The jump guard zeroes the
+    increment window when ``|p_t - p_{t-1}| > 3 * v_target * tau_s`` (episode-boundary
+    teleport); ``mdp.reset_start_pose`` additionally reseeds the cached previous position.
+
+    With ``normalize`` the filtered claw-axis speed is divided by ``v_target`` so this term
+    sits on the SAME [0,1]-ish scale as the normalized ``forward_velocity`` term.
     """
     asset = env.scene[asset_cfg.name]
     dt = float(env.step_dt)
-    pos = asset.data.root_pos_w.torch
-    cos_ref, sin_ref = get_ref_dir(env)
-    x = pos[:, 0] * cos_ref + pos[:, 1] * sin_ref  # position along the commanded heading
-    if not hasattr(env, "zombie_lp_dx") or env.zombie_lp_dx.shape[0] != x.shape[0]:
-        env.zombie_lp_dx = torch.zeros_like(x)
-        env.zombie_lp_dt = torch.zeros_like(x)
-        env.zombie_lp_x0 = x.clone()
-    dx = x - env.zombie_lp_x0
-    jump = dx.abs() > 3.0 * float(getattr(env.cfg, "v_target", 0.1)) * tau_s
-    # a mid-episode command resample (or episode reset) also invalidates the accumulated
-    # window: it was measured along the PREVIOUS command axis -> drop it for those envs
-    resampled = crawl_heading_resample_flag(env)
-    if resampled is not None:
-        jump = jump | resampled
+    pos = asset.data.root_pos_w.torch[:, :2]
+    if not hasattr(env, "zombie_prev_xy") or env.zombie_prev_xy.shape != pos.shape:
+        env.zombie_prev_xy = pos.clone()
+        env.zombie_lp_dx = torch.zeros(env.num_envs, device=env.device)
+        env.zombie_lp_dt = torch.zeros(env.num_envs, device=env.device)
+    d = pos - env.zombie_prev_xy
+    env.zombie_prev_xy = pos.clone()
+    cos_u, sin_u = get_claw_dir(env)
+    dx = d[:, 0] * cos_u + d[:, 1] * sin_u
+    jump = d.norm(dim=1) > 3.0 * float(getattr(env.cfg, "v_target", 0.1)) * tau_s
     env.zombie_lp_dx = torch.where(jump, torch.zeros_like(dx), env.zombie_lp_dx + dx)
     env.zombie_lp_dt = torch.where(jump, torch.zeros_like(dx), env.zombie_lp_dt)
-    env.zombie_lp_x0 = x.clone()
     decay = math.exp(-dt / tau_s)
     env.zombie_lp_dx = env.zombie_lp_dx * decay
     env.zombie_lp_dt = env.zombie_lp_dt * decay + dt
@@ -253,50 +277,49 @@ def forward_progress_lpf(
     return out
 
 
-def wrist_pointing_error(
+def yaw_rate_tracking(
     env: ManagerBasedEnv,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=("wrist",)),
+    sigma: float = 0.1,
+    tau_r: float = 1.5,
+    yaw_mask_s: float = 2.0,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """1 - cos of the angle between the base->wrist arrow and the COMMAND (0 = aligned, 2 = reversed).
+    """Claw-heading-rate tracking: ``up * clamp(tanh(v_c/v_target), 0, 1) * mask * bump``.
 
-    The pointing vector is the horizontal (XY-projected) arrow from the base origin to the
-    WRIST body origin -- the real claw-pointing direction, unlike the old base-yaw axis, which
-    ignored shoulder_pan (a robot crawling with the arm twisted off its base scored as aligned).
-    The commanded direction is ``zombie_ref_yaw`` (the target velocity is ``v_target`` along it,
-    and the speed magnitude cancels in the cos comparison). Matches the ``heading_error_wrist``
-    observation exactly, so the actor observes what the reward measures.
+    ``bump = exp(-((r - yaw_rate_cmd) / sigma)^2)`` is the ONLY exception to the additive
+    -terms rule (P2-4): these factors are gates on this one term, not products of separate
+    rewards.
 
-    Degeneracy guard: with the arm curled the horizontal arrow is near zero and its direction is
-    atan2 noise; there the penalty falls back to the old base-yaw axis (yaw - pi/2), which is
-    always defined and cannot be farmed by curling the arm.
+    * ``up`` -- flatness gate: no tracking credit while toppled (recovery first).
+    * ``clamp(tanh(v_c / v_target), 0, 1)`` -- pays only while crawling FORWARD, so standing
+      still cannot earn it (an ungated bump under a zero command pays its maximum for doing
+      nothing and collapses PPO to sitting).
+    * ``mask`` -- fades 0 -> 1 linearly over ``yaw_mask_s`` after every resample/reset,
+      because the filtered rate ``r`` lags a fresh command.
+    * Returns 0 while ``yaw_rate_max == 0`` (steering stage locked off).
+
+    Also advances the per-step bookkeeping: the claw-rate filter (exactly once per env
+    step, inside this term -- every consumer reads ``env.zombie_r_ema`` afterwards) and the
+    success-metric episode accumulators (:mod:`.metrics`).
     """
-    asset = env.scene[asset_cfg.name]
-    wrist_ids = getattr(env, "zombie_wrist_body_ids", None)
-    if wrist_ids is None:
-        ids, _names = asset.find_bodies(list(asset_cfg.body_names), as_proxy=True)
-        wrist_ids = ids.torch.reshape(-1)
-        if wrist_ids.numel() == 0:
-            raise ValueError(f"wrist_pointing_error: no body matching {asset_cfg.body_names}")
-        env.zombie_wrist_body_ids = wrist_ids
-    wrist = asset.data.body_pos_w.torch[:, wrist_ids[0]]
-    base = asset.data.root_pos_w.torch
-    dx = wrist[:, 0] - base[:, 0]
-    dy = wrist[:, 1] - base[:, 1]
-    arrow_yaw = torch.atan2(dy, dx)
-    # fallback axis: base yaw - pi/2 (body -Y, the claw side of the base plate)
-    quat_w = asset.data.root_quat_w.torch  # Isaac Lab 3.0: x, y, z, w
-    _, _, yaw = math_utils.euler_xyz_from_quat(quat_w)
-    fallback_yaw = yaw - 0.5 * math.pi
-    valid = torch.hypot(dx, dy) > 0.01
-    pointing_yaw = torch.where(valid, arrow_yaw, fallback_yaw)
-    # command source: live CommandManager term when dynamic heading is active, else the
-    # frozen per-episode draw from reset_start_pose (v0 behaviour)
-    ref = crawl_heading_command(env)
-    if ref is None:
-        ref = getattr(env, "zombie_ref_yaw", None)
-    if ref is None or ref.shape[0] != pointing_yaw.shape[0]:
-        ref = torch.zeros_like(pointing_yaw)
-    return 1.0 - torch.cos(_wrap_to_pi(pointing_yaw - ref))
+    from . import metrics
+
+    dt = float(env.step_dt)
+    _update_claw_heading_rate(env, dt, tau_r)
+    metrics.note_step(env, dt)
+    r_max = float(getattr(env, "extras", {}).get("yaw_rate_max", 0.0))
+    if r_max <= 0.0:
+        return torch.zeros(env.num_envs, device=env.device)
+    cmd = yaw_rate_command(env)
+    v = _base_lin_vel_w(env, asset_cfg)
+    cos_u, sin_u = get_claw_dir(env)
+    v_c = v[:, 0] * cos_u + v[:, 1] * sin_u
+    target = torch.clamp(get_v_target(env), min=1e-3)
+    up = flatness_gate(env, asset_cfg)
+    fwd = torch.clamp(torch.tanh(v_c / target), min=0.0, max=1.0)
+    mask = torch.clamp(env.zombie_time_since_resample / yaw_mask_s, min=0.0, max=1.0)
+    bump = torch.exp(-((env.zombie_r_ema - cmd) / sigma) ** 2)
+    return up * fwd * mask * bump
 
 
 def lateral_velocity(
@@ -313,7 +336,6 @@ def lateral_velocity(
 def overspeed_penalty(
     env: ManagerBasedEnv,
     factor: float = 2.0,
-    command_name: str | None = None,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
     """Quadratic penalty for velocity along the claw (locomotion) axis above ``factor * v_target``."""

@@ -39,8 +39,8 @@ env.reset()
 obs_mgr = env.unwrapped.observation_manager
 for group_name in ["policy", "critic"]:
     tensor = obs_mgr.compute_group(group_name)
-    print(f"obs_group {group_name} {tensor.shape[1]}")
-print(f"action_dim {env.unwrapped.action_manager.total_action_dim}")
+    print(f"obs_group {group_name} {tensor.shape[1]}", flush=True)
+print(f"action_dim {env.unwrapped.action_manager.total_action_dim}", flush=True)
 
 env.close()
 simulation_app.close()

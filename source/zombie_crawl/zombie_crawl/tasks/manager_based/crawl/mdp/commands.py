@@ -5,21 +5,22 @@
 
 """Command terms for the zombie crawl task.
 
-``UniformCrawlHeadingCommand`` is the framework-native replacement for the frozen
-``env.zombie_ref_yaw`` direction drawn by ``mdp.reset_start_pose``: the commanded crawl
-heading is a per-environment uniform +-180 deg draw that, unlike the frozen version, is
-RESAMPLED mid-episode (per env, staggered) every ``resampling_time_range`` seconds by the
-Isaac Lab :class:`~isaaclab.managers.command_manager.CommandManager`.
+``UniformYawRateCommand`` is the phase-2 command: a per-environment commanded YAW RATE
+(rad/s) that the actor must track with the claw heading rate ``r``
+(``mdp.claw_heading_rate``). Unlike the removed heading-error input, a rate command is
+proprioception-only -- the robot never needs external localization or an absolute yaw
+reference (the QMI8658 IMU has no magnetometer, so absolute yaw is unobservable on
+hardware anyway).
 
-Everything directional (rewards, stall gate, curriculum gates, the cyan video arrow) reads
-the command through ``mdp.get_ref_dir``, which prefers this term when it is active, so the
-policy sees the NEW target on the very next observation without any extra channel: the
-``heading_error_wrist`` term is (cos, sin) of claw-minus-command and simply moves.
+Every (re-)sample: with probability ``zero_prob`` the command is exactly 0, otherwise
+it is drawn uniformly from ``(-r_max, +r_max)`` with ``r_max =
+env.extras["yaw_rate_max"]`` (a dial owned by the yaw-rate stage curriculum,
+:func:`~.curriculums.yaw_rate_stage_curriculum`). While ``yaw_rate_max`` is 0 every
+command is 0, i.e. the steering stage is locked off.
 """
 
 from __future__ import annotations
 
-import math
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
@@ -33,21 +34,23 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 
-class UniformCrawlHeadingCommand(CommandTerm):
-    """Per-env commanded crawl heading (rad), resampled uniformly mid-episode.
+class UniformYawRateCommand(CommandTerm):
+    """Per-env commanded yaw rate (rad/s), resampled uniformly mid-episode.
 
-    ``command`` is ``(num_envs, 1)`` yaw. ``just_resampled`` marks the envs whose command
-    changed on the most recent ``compute()`` step (or episode reset): the stateful terms
-    that accumulate progress along the command axis (``forward_progress_lpf``, ``stalled``,
-    the curriculum velocity EMA) use it to re-anchor for those envs instead of silently
-    mixing two different axes.
+    ``command`` is ``(num_envs, 1)``. ``just_resampled`` marks the envs whose command
+    changed on the most recent ``compute()`` step: ``yaw_rate_tracking`` restarts its
+    post-resample mask timer for those envs (the filtered claw heading rate lags a fresh
+    command, so the tracking reward must not pay before the filter settles).
+
+    ``pin(value)`` freezes the command at ``value`` for every env (used by ``play.py
+    --yaw_rate`` and the evaluation script); ``unpin()`` restores stochastic resampling.
     """
 
-    def __init__(self, cfg: UniformCrawlHeadingCommandCfg, env: ManagerBasedRLEnv):
+    def __init__(self, cfg: UniformYawRateCommandCfg, env: ManagerBasedRLEnv):
         super().__init__(cfg, env)
-        self.heading = torch.zeros(self.num_envs, device=self.device)
+        self.yaw_rate = torch.zeros(self.num_envs, device=self.device)
         self.just_resampled = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self._gate_open = False
+        self._pinned: float | None = None
 
     """
     Properties.
@@ -55,67 +58,59 @@ class UniformCrawlHeadingCommand(CommandTerm):
 
     @property
     def command(self) -> torch.Tensor:
-        """Commanded heading [rad]. Shape is (num_envs, 1)."""
-        return self.heading.unsqueeze(-1)
+        """Commanded yaw rate [rad/s]. Shape is (num_envs, 1)."""
+        return self.yaw_rate.unsqueeze(-1)
 
     """
     Operations.
     """
 
     def compute(self, dt: float):
-        # the flag describes only THIS step's resamples; reset() also flips it (episode
-        # restart = new axis), which the stateful readers handle as a re-anchor
+        # the flag describes only THIS step's resamples; mid-episode resamples are set
+        # here, episode resets are re-anchored directly by mdp.reset_start_pose
         self.just_resampled.zero_()
-        if not self._gate_open and not self._curriculum_gate_open():
-            # early curriculum: hold each episode's heading frozen -- pin the countdown to
-            # inf so the base never fires; reset() still draws a fresh heading per episode,
-            # which is exactly the frozen (pre-dynamic) behaviour
+        if self._pinned is not None:
+            # pinned: keep the countdown armed-but-unfiring so no stochastic resample
+            # can overwrite the constant command
             self._update_metrics()
             self.time_left[:] = float("inf")
             return
-        if not self._gate_open:
-            # gate just opened: start staggered countdowns so the first mid-episode jumps
-            # spread over [lo, hi] seconds rather than firing simultaneously
-            self._gate_open = True
-            lo, hi = self.cfg.resampling_time_range
-            self.time_left.uniform_(lo, hi)
         super().compute(dt)
 
-    def _curriculum_gate_open(self) -> bool:
-        """Mid-episode resampling unlocks at ``curriculum_gate_frac`` of the global difficulty.
+    def pin(self, value: float):
+        """Freeze the command at ``value`` rad/s for every environment."""
+        self._pinned = float(value)
+        self.yaw_rate[:] = self._pinned
+        self.time_left[:] = float("inf")
 
-        Staging mirrors :func:`~...curriculums.difficulty_curriculum` (fallen spawns fill
-        over [0, 0.5], pushes over [0.5, 1]): the command may only start JUMPING once the
-        policy already crawls reliably under disturbances. A missing ``difficulty`` extra
-        (curriculum disabled) counts as fully trained, so ``use_curriculum=False`` runs get
-        the dynamic heading immediately.
-        """
-        frac = float(getattr(self.cfg, "curriculum_gate_frac", 0.0))
-        if frac <= 0.0:
-            return True
-        extras = getattr(self._env, "extras", {}) or {}
-        try:
-            return float(extras.get("difficulty", 1.0)) >= frac
-        except (TypeError, ValueError):
-            return True
+    def unpin(self):
+        """Resume stochastic resampling with staggered countdowns."""
+        self._pinned = None
+        lo, hi = self.cfg.resampling_time_range
+        self.time_left.uniform_(lo, hi)
 
     """
     Implementation specific functions.
     """
 
     def _update_metrics(self):
-        # CommandManager.reset logs mean of each metric per episode (Metrics/crawl_heading/*)
-        self.metrics["heading_abs"] = self.heading.abs()
-        self.metrics["resamples_per_episode"] = self.command_counter.to(self.heading.dtype)
-        self.metrics["gate_open"] = torch.full(
-            (self.num_envs,), float(self._gate_open), device=self.device
-        )
+        # CommandManager.reset logs mean of each metric per episode
+        # (Metrics/yaw_rate_cmd/abs, Metrics/yaw_rate_cmd/resamples_per_episode)
+        self.metrics["abs"] = self.yaw_rate.abs()
+        self.metrics["resamples_per_episode"] = self.command_counter.to(self.yaw_rate.dtype)
 
     def _resample_command(self, env_ids: Sequence[int] | slice):
         num_envs = len(range(self.num_envs)[env_ids]) if isinstance(env_ids, slice) else len(env_ids)
-        self.heading[env_ids] = math_utils.sample_uniform(
-            self.cfg.heading_range[0], self.cfg.heading_range[1], (num_envs,), device=self.device
-        )
+        if self._pinned is not None:
+            self.yaw_rate[env_ids] = self._pinned
+            self.just_resampled[env_ids] = True
+            return
+        r_max = float(getattr(self._env, "extras", {}).get("yaw_rate_max", 0.0))
+        cmd = math_utils.sample_uniform(-r_max, r_max, (num_envs,), device=self.device)
+        zero_draw = torch.rand(num_envs, device=self.device) < self.cfg.zero_prob
+        cmd[zero_draw] = 0.0
+        cmd[r_max <= 0.0] = 0.0
+        self.yaw_rate[env_ids] = cmd
         self.just_resampled[env_ids] = True
 
     def _update_command(self):
@@ -123,18 +118,10 @@ class UniformCrawlHeadingCommand(CommandTerm):
 
 
 @configclass
-class UniformCrawlHeadingCommandCfg(CommandTermCfg):
-    """Config for the uniform crawl-heading command term."""
+class UniformYawRateCommandCfg(CommandTermCfg):
+    """Config for the uniform yaw-rate command term."""
 
-    class_type: type[CommandTerm] = UniformCrawlHeadingCommand
+    class_type: type[CommandTerm] = UniformYawRateCommand
 
-    heading_range: tuple[float, float] = (-math.pi, math.pi)
-    """Uniform range [rad] the commanded heading is drawn from on every (re-)sample."""
-
-    curriculum_gate_frac: float = 0.75
-    """Global-curriculum difficulty in [0, 1] at which mid-episode resampling unlocks.
-
-    Below it the term behaves exactly like the frozen per-episode command (one heading
-    per episode, drawn at reset). 0.0 disables the gate. Staggered after the difficulty
-    curriculum's other channels (fallen spawns [0, 0.5], pushes [0.5, 1]).
-    """
+    zero_prob: float = 0.2
+    """Probability that a (re-)sampled command is exactly 0 (stationary / straight target)."""

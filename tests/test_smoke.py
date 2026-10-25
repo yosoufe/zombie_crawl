@@ -72,10 +72,11 @@ def test_obs_action_dimensions(venv_python):
         m = re.match(r"(obs_group \w+|action_dim) (\d+)", line)
         if m:
             dims[m.group(1)] = int(m.group(2))
-    # 26 = projected_gravity(3) + heading_err(2) + base_ang_vel(3) + joint_pos(6)
-    #      + joint_vel(6) + last_action(6); gait_clock term is None by default
-    assert dims.get("obs_group policy") == 26, f"unexpected policy obs dim: {dims}"
-    assert dims.get("obs_group critic") == 5, f"unexpected critic (privileged) obs dim: {dims}"
+    # 25 = projected_gravity(3) + base_ang_vel(3) + joint_pos(6) + joint_vel(6)
+    #      + last_action(6) + yaw_rate_cmd(1); gait_clock term is None by default
+    assert dims.get("obs_group policy") == 25, f"unexpected policy obs dim: {dims}"
+    # 6 = policy privileged set + claw_heading_rate (r) -- sim-only, never an actor input
+    assert dims.get("obs_group critic") == 6, f"unexpected critic (privileged) obs dim: {dims}"
     assert dims.get("action_dim") == 6, f"unexpected action dim: {dims}"
 
 
@@ -150,19 +151,17 @@ def test_play_loads_checkpoint(venv_python):
     assert proc.returncode == 0, f"play failed:\n{proc.stdout[-4000:]}\n{proc.stderr[-4000:]}"
 
 
-# ---------------------------------------------------------------- test 6: dynamic heading
+# ---------------------------------------------------------------- test 6: yaw-rate command
 
 
-def test_dynamic_heading_training_smoke(venv_python):
-    """A short run with env.use_dynamic_heading=true boots the crawl_heading command term,
-    trains without NaNs, and reports the term on the Command Manager banner."""
+def test_yaw_rate_command_training_smoke(venv_python):
+    """A short default run boots the yaw-rate command term, trains without NaNs, and the
+    stage-0 lock keeps EVERY command exactly zero (motion first, steering last)."""
     proc = run_script(
         [
             str(SCRIPTS / "train.py"),
             "--task",
             "Zombie-Crawl-SO100-v0",
-            "env.use_dynamic_heading=true",
-            "env.heading_resample_range=[4,8]",
             "--num_envs",
             "32",
             "--max_iterations",
@@ -171,23 +170,61 @@ def test_dynamic_heading_training_smoke(venv_python):
             "--seed",
             "0",
             "--experiment_name",
-            "smoke_test_dynhead",
+            "smoke_test_yawrate",
             "--run_name",
             "pytest",
         ],
         timeout=2400,
     )
     assert proc.returncode == 0, f"train failed:\n{proc.stdout[-4000:]}\n{proc.stderr[-4000:]}"
-    assert "UniformCrawlHeadingCommand" in proc.stdout, "command term not instantiated"
-    log_dir = REPO_ROOT / "logs" / "rsl_rl" / "smoke_test_dynhead"
+    assert "UniformYawRateCommand" in proc.stdout, "command term not instantiated"
+    log_dir = REPO_ROOT / "logs" / "rsl_rl" / "smoke_test_yawrate"
     assert list(log_dir.rglob("model_*.pt")), f"no checkpoint under {log_dir}"
-    # curriculum gate: 3 iterations cannot reach difficulty 0.75 -> resampling must still
-    # be locked (frozen per-episode heading, v0 behaviour) -- gate_open == 0 in TensorBoard
+    # 3 iterations cannot reach difficulty 0.75 -> stage ladder must still be at stage 0:
+    # yaw_rate_max dial == 0 and every logged command magnitude == 0
     from tensorboard.backend.event_processing import event_accumulator
 
     tfe = sorted(log_dir.rglob("events.out.tfevents.*"))[-1]
     ea = event_accumulator.EventAccumulator(str(tfe), size_guidance={"scalars": 0})
     ea.Reload()
-    tag = "Metrics/crawl_heading/gate_open"
-    assert tag in ea.Tags()["scalars"], f"missing {tag} (term metrics not logged)"
-    assert all(s.value == 0.0 for s in ea.Scalars(tag)), "gate opened during early training!"
+    tags = ea.Tags()["scalars"]
+    for tag in (
+        "Metrics/yaw_rate_cmd/abs",
+        "Metrics/yaw_rate_cmd/resamples_per_episode",
+        "Curriculum/yaw_rate_stage/yaw_rate_max",
+        "Curriculum/yaw_rate_stage/stage",
+        "Curriculum/crawl_metrics/crawl_success",
+        "Curriculum/difficulty/fallen_frac",
+    ):
+        assert tag in tags, f"missing {tag} (term metrics not logged)"
+    assert all(
+        s.value == 0.0 for s in ea.Scalars("Metrics/yaw_rate_cmd/abs")
+    ), "stage-0 lock violated: non-zero yaw-rate command issued!"
+    assert all(
+        s.value == 0.0 for s in ea.Scalars("Curriculum/yaw_rate_stage/yaw_rate_max")
+    ), "yaw_rate_max dial moved before its gate"
+    assert all(
+        s.value == 0.0 for s in ea.Scalars("Curriculum/difficulty/fallen_frac")
+    ), "fallen starts active at iteration ~0 (upright-first sanity violated)"
+
+
+# --------------------------------------------------- test 7: command sampling statistics
+
+
+def test_command_sampling_helper(venv_python):
+    """AGENTS.md pre-launch smoke gate: zero fraction ~0.2, |cmd| <= yaw_rate_max, both
+    signs present, pinning freezes the draw."""
+    proc = run_script([str(HELPERS / "check_command.py"), "--num_envs", "16", "--headless"])
+    assert proc.returncode == 0, f"helper failed:\n{proc.stdout}\n{proc.stderr}"
+    assert "[helper] OK" in proc.stdout
+
+
+# --------------------------------------------------- test 8: fallen-only-when-asked reset
+
+
+def test_fallen_starts_only_with_fallen_frac(venv_python):
+    """Without env.extras['fallen_frac'] every reset spawns FOLDED (pitfall X1) and
+    started_fallen is recorded False for all envs."""
+    proc = run_script([str(HELPERS / "check_fallen.py"), "--num_envs", "32", "--headless"])
+    assert proc.returncode == 0, f"helper failed:\n{proc.stdout}\n{proc.stderr}"
+    assert "[helper] OK" in proc.stdout

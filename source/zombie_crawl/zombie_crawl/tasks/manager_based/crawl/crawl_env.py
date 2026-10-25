@@ -42,12 +42,17 @@ class CrawlRLEnv(ManagerBasedRLEnv):
     """Crawl env that keeps the headless training-video viewer rendering fresh frames."""
 
     def __init__(self, cfg, render_mode=None, **kwargs):
-        # the Hydra composition path can set cfg.use_dynamic_heading AFTER __post_init__
-        # ran, so wire the crawl_heading command term here too (idempotent)
-        ensure = getattr(cfg, "_ensure_crawl_heading_term", None)
-        if ensure is not None:
-            ensure()
         super().__init__(cfg, render_mode, **kwargs)
+        # play/evaluation command control (P2-13): the curriculum dials yaw_rate_max in
+        # training; outside it play_mode/evaluate set cfg.play_yaw_rate_max so the command
+        # term draws non-zero rates, and scripts/play.py --yaw_rate pins a constant
+        # command for all envs (read from the process-local flag, which the unified
+        # entrypoint can deliver but a Hydra field could not).
+        forced_max = getattr(cfg, "play_yaw_rate_max", None)
+        if forced_max is not None and self.command_manager is not None:
+            self.extras["yaw_rate_max"] = float(forced_max)
+        if video_flags.play_yaw_rate is not None and self.command_manager is not None:
+            self.command_manager.get_term("yaw_rate_cmd").pin(float(video_flags.play_yaw_rate))
         if getattr(cfg, "record_training_video", False):
             # A Camera sensor sets these in Camera._initialize_impl; the world-space
             # headless viewer has no sensor, so set them here to keep the viewport

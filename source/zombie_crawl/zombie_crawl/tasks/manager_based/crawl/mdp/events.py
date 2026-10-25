@@ -48,19 +48,30 @@ def reset_start_pose(
     xy_offset: float = 0.05,
     yaw_range: tuple[float, float] = (-3.14, 3.14),
     velocity_range: tuple[float, float] = (0.0, 0.0),
+    fallen_frac_override: float | None = None,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> None:
     """Reset the robot into one of the named start poses, sampled per environment.
 
     Each pose entry maps a name to ``{"pos": (x, y, z), "rot": (roll, pitch, yaw), "joint_pos": {name: rad}}``.
     On top of the named pose the function adds: a uniform yaw in ``yaw_range``, a small x/y
-    offset, uniform joint noise, and zero velocity. The command direction is stored on
-    ``env.zombie_ref_yaw`` — a uniform +-180 deg draw, independent of the spawn facing;
-    rewards and curriculum score progress along it for the whole episode. With
-    ``use_dynamic_heading`` the ``mdp.UniformCrawlHeadingCommand`` command term owns the
-    direction instead (mid-episode resampled; ``mdp.get_ref_dir`` prefers it and this draw
-    only randomizes the spawn facing).
+    offset, uniform joint noise, and zero velocity.
+
+    Start-pose mixing (pitfall X1): fallen starts come ONLY from the difficulty
+    curriculum's ``env.extras["fallen_frac"]`` (or an explicit ``fallen_frac_override``,
+    used by the training-spec play clip and the evaluation script). When that key is
+    absent the configured ``pose_weights`` are used as-is; with no explicit weights the
+    robot spawns FOLDED ONLY -- the old implicit 0.5/0.25/0.25 toppled fallback is removed
+    so a replaced/disabled curriculum can never silently start half the population
+    toppled from iteration 0.
+
+    This term is the single mandated place where every per-episode stateful bookkeeping
+    buffer is re-anchored: the claw-axis progress LPF (``zombie_prev_xy`` + window), the
+    claw-heading-rate filter reseed request, the stall-window anchor (position + step 0),
+    and ``started_fallen``.
     """
+    from . import metrics
+
     asset: Articulation = env.scene[asset_cfg.name]
     device = asset.device
     env_ids = _normalize_env_ids(env, env_ids, device)
@@ -68,18 +79,22 @@ def reset_start_pose(
 
     names = list(poses.keys())
     # dynamic fallen-start fraction from the difficulty curriculum: with >=3 poses ordered
-    # (folded, on_side, face_down) and env.extras["fallen_frac"] set, override the baked
-    # pose_weights so the toppled fraction grows 0 -> fallen_max as difficulty ramps. Without the
-    # key (play/eval, or curriculum disabled) fall back to the static pose_weights.
-    f = env.extras.get("fallen_frac", None)
+    # (folded, on_side, face_down) and an explicit fallen fraction set, override the baked
+    # pose_weights so the toppled fraction grows 0 -> fallen_max as difficulty ramps.
+    f = fallen_frac_override
+    if f is None:
+        f = env.extras.get("fallen_frac", None)
     if f is not None and len(names) >= 3:
         f = float(f)
         weights_list = [1.0 - f, f / 2.0, f / 2.0]
         weights = torch.tensor(weights_list, device=device)
+    elif pose_weights is not None:
+        weights = torch.tensor(pose_weights, device=device)
+    elif len(names) >= 3:
+        # X1: no curriculum fraction and no explicit weights -> folded only, ALWAYS
+        weights = torch.tensor([1.0] + [0.0] * (len(names) - 1), device=device)
     else:
-        weights = torch.tensor(
-            pose_weights if pose_weights is not None else [1.0 / len(names)] * len(names), device=device
-        )
+        weights = torch.full((len(names),), 1.0 / len(names), device=device)
     weights = weights / weights.sum()
     pose_ids = torch.multinomial(weights, n, replacement=True)
 
@@ -94,21 +109,15 @@ def reset_start_pose(
         for jname, jval in pose["joint_pos"].items():
             idx = asset.joint_names.index(jname)
             joint_pos[i, idx] = jval
+    # record per-env start class for the success metrics (upright vs fallen episodes)
+    metrics.set_started_fallen(env, env_ids, pose_ids.to(device) > 0)
 
-    # randomization: yaw, xy offset, joint noise
+    # randomization: yaw, xy offset, joint noise (kept at the phase-1 values; the old
+    # zombie_ref_yaw command draw is gone -- the command is a yaw RATE now, drawn by the
+    # command term, so nothing directional is sampled here)
     # note: Isaac Lab 3.0 sample_uniform signature is (lower, upper, size, device)
     yaw = math_utils.sample_uniform(yaw_range[0], yaw_range[1], n, device=device)
     orientations_rpy[:, 2] += yaw
-    # COMMAND the crawl direction: a uniform +-180 deg draw, INDEPENDENT of the spawn
-    # facing. (cos, sin) of this value is the forward axis every directional term scores
-    # against; the heading_error_wrist observation exposes it to the actor as the angle
-    # between the claw arrow and this target, so the policy must turn toward the command
-    # and crawl it (previously the target was frozen to the spawn jaw axis, which made
-    # the "command" derivable from the spawn pose and removed any need to turn).
-    target_yaw = math_utils.sample_uniform(-math.pi, math.pi, n, device=device)
-    if not hasattr(env, "zombie_ref_yaw") or env.zombie_ref_yaw.shape[0] != env.num_envs:
-        env.zombie_ref_yaw = torch.zeros(env.num_envs, device=device)
-    env.zombie_ref_yaw[env_ids] = torch.atan2(torch.sin(target_yaw), torch.cos(target_yaw))
     positions[:, 0] += math_utils.sample_uniform(-xy_offset, xy_offset, n, device=device)
     positions[:, 1] += math_utils.sample_uniform(-xy_offset, xy_offset, n, device=device)
     if joint_noise > 0:
@@ -124,16 +133,43 @@ def reset_start_pose(
     # positions are relative to the environment origin
     # (env_origins is a CPU tensor on the no-terrain path; move it to the sim device)
     positions = positions + env.scene.env_origins[env_ids].to(device)
-    # the directional progress rewards cache position along the reference axis; when the
-    # ref re-rolls at reset, reseed those caches with the CURRENT projected position --
-    # a magnitude-based jump guard alone misses small re-rolls near the world origin
-    cos_j, sin_j = torch.cos(target_yaw), torch.sin(target_yaw)
-    p0 = positions[:, 0] * cos_j + positions[:, 1] * sin_j
-    for buf_name, val in (("zombie_lp_dx", 0.0), ("zombie_lp_dt", 0.0),
-                          ("zombie_lp_x0", p0), ("zombie_prev_x", p0)):
-        buf = getattr(env, buf_name, None)
-        if buf is not None and buf.shape[0] == env.num_envs:
-            buf[env_ids] = val
+
+    # ---- per-episode stateful bookkeeping re-anchors (P2-5/P2-6/P2-8) ----------------
+    # claw-axis progress LPF: cache the SPAWN position as "previous position" and drop the
+    # accumulated window (replaces the old axis-projected zombie_lp_x0/zombie_prev_x seeding)
+    prev_xy = getattr(env, "zombie_prev_xy", None)
+    if prev_xy is None or prev_xy.shape[0] != env.num_envs:
+        env.zombie_prev_xy = positions[:, :2].clone()
+        env.zombie_lp_dx = torch.zeros(env.num_envs, device=device)
+        env.zombie_lp_dt = torch.zeros(env.num_envs, device=device)
+    else:
+        env.zombie_prev_xy[env_ids] = positions[:, :2]
+        env.zombie_lp_dx[env_ids] = 0.0
+        env.zombie_lp_dt[env_ids] = 0.0
+    # claw heading rate filter: request reseed (r=0, psi_prev=current, timer=0) on the
+    # first reward step of the new episode -- the live claw yaw is not readable yet.
+    # The five rate-filter buffers are created TOGETHER (any lazy creator may run first),
+    # so the presence of the reseed flag is the single source of truth for "initialized".
+    if (
+        getattr(env, "zombie_rate_reseed", None) is None
+        or env.zombie_rate_reseed.shape[0] != env.num_envs
+    ):
+        env.zombie_r_ema = torch.zeros(env.num_envs, device=device)
+        env.zombie_psi_prev = torch.zeros(env.num_envs, device=device)
+        env.zombie_arrow_valid_prev = torch.zeros(env.num_envs, dtype=torch.bool, device=device)
+        env.zombie_time_since_resample = torch.zeros(env.num_envs, device=device)
+        env.zombie_rate_reseed = torch.zeros(env.num_envs, dtype=torch.bool, device=device)
+    else:
+        env.zombie_rate_reseed[env_ids] = True
+    # stall window anchor: position = spawn, step = 0 (episode_length_buf is zeroed later
+    # in the same reset step by the env manager, so "now" is the new episode's origin)
+    if getattr(env, "zombie_stall_anchor_xy", None) is None or env.zombie_stall_anchor_xy.shape[0] != env.num_envs:
+        env.zombie_stall_anchor_xy = positions[:, :2].clone()
+        env.zombie_stall_anchor_step = torch.zeros_like(env.episode_length_buf)
+    else:
+        env.zombie_stall_anchor_xy[env_ids] = positions[:, :2]
+        env.zombie_stall_anchor_step[env_ids] = 0
+
     # Isaac Lab 3.0: write_*_to_sim_index APIs are keyword-only with renamed params
     asset.write_root_pose_to_sim_index(root_pose=torch.cat([positions, orientations], dim=-1), env_ids=env_ids)
 
