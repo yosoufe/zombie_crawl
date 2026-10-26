@@ -249,107 +249,171 @@ The training recipe MUST also reach these results from scratch with a second see
 
 ---
 
-# PHASE 3 — Additional maneuvers: sit still, rotate in place, variable-speed forward + turn
+# PHASE 3 — Four commanded behaviors and the transitions between them
 
-**Starting point:** the Phase 2 code and the recipe that worked (rewards, curriculum, bookkeeping rules X1–X8 all still apply). Phase 3 trains **from scratch** with the extended command space; no warm start from Phase 2 weights. The ladder (§B.9) applies here too.
+**Starting point:** the Phase 2 code and the recipe that worked (rewards, curriculum, bookkeeping rules X1–X8 and the ladder discipline all still apply). Phase 3 trains **from scratch** with the extended command set; no warm start from Phase 2 weights.
 
-## B.1 Behaviors
+## B.1 The four behaviors (this is the whole scope)
 
-| Command | Behavior |
-|---|---|
-| `vx_cmd > 0`, `yaw_rate_cmd ≈ 0` | Crawl forward |
-| `vx_cmd = 0`, `yaw_rate_cmd = 0` | Sit still in the rest pose |
-| `vx_cmd = 0`, `yaw_rate_cmd ≠ 0` | Rotate in place without translating |
-| `vx_cmd > 0`, `yaw_rate_cmd ≠ 0` | Crawl while turning, at variable speed |
+| ID | Behavior | Command `(vx_cmd, yaw_rate_cmd)` | Required result |
+|---|---|---|---|
+| M1 | Forward | `(v_fwd, 0)` | Crawl straight at constant speed |
+| M2 | Forward + turn | `(v_fwd, ω)`, `ω ≠ 0` | Crawl at constant speed along a curve; the claw heading rotates at the commanded rate |
+| M3 | Rotate in place | `(0, ω)`, `ω ≠ 0` | Zero linear velocity. The claw heading rotates at the commanded rate: first by turning the arm (shoulder pan); **when the pan joint reaches its limit, the base itself must turn** so the heading keeps rotating |
+| M4 | Rest | `(0, 0)` | Settle into the rest pose on the base and stay still |
 
-One policy handles all modes. Sit comes from a zero command only; there is no separate sit flag.
+- "Constant" means held fixed until the next command. Forward speed takes only two values: `0` or `v_fwd`. The yaw rate is continuous in the Phase 2 range (±0.3 rad/s, provisional).
+- `v_fwd` is Phase 2's `v_target` dial (0.06 → 0.10 m/s, same gates). **Variable forward speed is out of scope for Phase 3 (see Phase 4).**
+- The policy MUST handle transitions between any two behaviors (12 ordered pairs). Rest comes from a zero command only; there is no separate sit flag.
 
 ## B.2 Command and observation
 
-**P3-1.** Add `vx_cmd` ∈ [0, 0.15] m/s, replacing the fixed `v_target` as the forward-speed target (Phase 2's `yaw_rate_cmd` range is unchanged). Actor dimension **25 → 26**. Critic gains the mode indicators `is_zero_cmd`, `is_rotate_only`.
-- **Deadband:** `|vx_cmd| < 0.02` and `|yaw_rate_cmd| < 0.05` count as zero. Derive the indicators from these.
-- The command term gains the `vx_cmd` component and a mode-mix sampler (§B.6). The `v_target` ramp (0.06 → 0.10) is superseded by sampled `vx_cmd`; keep it as an early-stage cap if it helps and document the choice.
-- The gait clock stays off.
+**P3-1.**
+- Add actor input `vx_cmd` (scaled by 1/0.15). Actor dimension **25 → 26**. In Phase 3 it takes only the values 0 or `v_fwd`; keeping it a continuous-valued input means Phase 4 needs no layout change.
+- Critic (privileged) gains a one-hot of the current mode (M1–M4). Privileged terms MUST NOT enter the `policy` group.
+- Deadband: `|vx_cmd| < 0.02` m/s and `|yaw_rate_cmd| < 0.05` rad/s count as zero. Derive the indicators `fwd_on = vx_cmd > deadband`, `is_zero_cmd`, `is_rotate_only` from these. The command term also stores the integer `mode` per env, for logging and metrics.
+- Gait clock stays off.
 
-## B.3 Rest pose
+**P3-2 (command term).** Extend `UniformYawRateCommand` into a mode-mix command term (§B.7). Keep `just_resampled`. Phase 2's `yaw_rate_max` dial still caps `|ω|`.
 
-**P3-2.** Rest pose = base on the ground, arm folded, low CoM. Default is **folded (all joints at URDF zero)**: it is the zero-action pose of `OffsetEMAJointPositionToLimitsAction`, holds still under the `servo` actuator preset, and rests at base z ≈ 0.033 m. A lower candidate (`shoulder_lift 0.3, wrist_flex 0.6, gripper 0.5`) also holds; naive mid-joint tucks collapse. Record the chosen pose and why in `docs/rest_pose.md`.
+## B.3 Rest pose (M4)
+
+**P3-3.**
+- Rest pose = base plate on the ground, upright, arm folded, low center of mass, stable with the servos holding position.
+- Default: **folded (all joints at URDF zero)**. It is the zero-action pose of `OffsetEMAJointPositionToLimitsAction`, holds still under the `servo` actuator preset, and rests at base z ≈ 0.033 m. A lower candidate (`shoulder_lift 0.3, wrist_flex 0.6, gripper 0.5`) also holds; naive mid-joint tucks collapse. Record the chosen pose, its resting base height `h_rest`, and the reason in `docs/rest_pose.md`.
+- **`rest_pose_ok`** (used in rewards, metrics and acceptance) = flatness `up ≥ 0.95` **and** base height within 0.01 m of `h_rest` **and** every joint within 0.15 rad of the rest pose. "On its base correctly" means exactly this.
 
 ## B.4 Rewards by mode
 
-Phase 2 rewards stay. Changes:
+Phase 2 rewards stay, with the gates below. New terms are marked. Weights are initial values to tune.
 
-| Term | Active when | Form |
-|---|---|---|
-| `forward_velocity` | always | target is `vx_cmd` (posture gate and `tanh` unchanged) |
-| `forward_progress` | `vx_cmd` above deadband | as Phase 2 |
-| `yaw_rate_tracking` | `yaw_rate_max > 0` | as Phase 2, but the forward-speed factor is replaced by 1 when `is_rotate_only` (rotation is the goal) |
-| Stillness: base speed (−) | `is_zero_cmd` | `‖v_base‖²`, after the settle grace |
-| Stillness: joint velocity (−) | `is_zero_cmd` | `‖q̇‖²`, after the settle grace |
-| Rest-pose attraction (+) | `is_zero_cmd` **and** `up` high | `exp(−‖q − q_rest‖² / σ_q²)`; gated off while tipped |
-| No translation (−) | `is_rotate_only` | `‖v_base,xy‖²` |
-| `overspeed` | always | above `2·max(vx_cmd, small)` |
+| Term | Weight | Active when | Definition |
+|---|---|---|---|
+| `forward_velocity` | +2.5 | `fwd_on` | As Phase 2 with target `v_fwd` (`tanh`, posture gate on the forward half). Paid only in M1 and M2 |
+| `forward_progress` | +1.0 | `fwd_on` | As Phase 2 (axis-free increments) |
+| `yaw_rate_tracking` | +1.5 | not `is_zero_cmd` | M1 and M2: Phase 2 form (includes the forward-speed factor). **M3: the forward-speed factor is replaced by 1**, keeping the `up` gate and the 2 s mask (rotation is the goal). Never paid in M4 |
+| `rotation_no_translation` (new) | −2.0 | `is_rotate_only` | `‖v_base,xy‖²` |
+| `stillness_base` (new) | −2.0 | `is_zero_cmd` | `‖v_base‖²`, scaled by the settle grace |
+| `stillness_joints` (new) | −0.05 | `is_zero_cmd` | `‖q̇‖²`, scaled by the settle grace |
+| `rest_pose` (new) | +1.5 | `is_zero_cmd` and `up ≥ 0.9` (smooth gate) | `exp(−‖q − q_rest‖² / 0.3²)` |
+| `lateral_velocity`, `overspeed`, `vertical_velocity`, `base_height`, `orientation`, `recovery`, `action_rate`, `joint_acc`, `joint_torques`, `alive` | Phase 2 values | always | Unchanged (`overspeed` keeps its `2·v_fwd` limit) |
 
 Rules:
-- **Recovery precedence:** while `is_zero_cmd` and the base is tipped, `recovery` stays active and the rest-pose attraction is gated off until level. A fallen robot gets up first, then sits.
-- **Settle grace:** scale stillness penalties down for ~2 s after the command becomes zero.
-- **Smooth gating:** ramp indicator gates over ~0.5 s; no hard reward discontinuities.
-- **Pushes while sitting (owner decision):** pushes stay on during sit training. Sit is graded twice: strict (pushless) and loose (with pushes).
-- **Rotate-only with a rotating claw arrow:** `forward_velocity` has no meaning at `vx_cmd = 0`; make sure it stays near zero there (target 0, `tanh` of a small value) and does not reward drifting.
+- **Additive only (P2-4 still applies).** The gates above select which terms are active; they do not multiply separate rewards together.
+- **Recovery precedence.** If the base is tipped, `recovery` stays active in every mode, and `rest_pose` and `yaw_rate_tracking` are gated off by `up` until the base is level. A fallen robot gets up first.
+- **Settle grace.** After the command becomes zero, ramp the stillness penalties from 0 to full over 2 s (deceleration is unavoidable).
+- **Smooth gating.** Ramp every indicator-based gate over ~0.5 s; no hard reward discontinuities.
+- **Pushes while resting (owner decision).** Pushes stay on during training. M4 is graded twice: strict (pushless) and loose (with pushes).
+- `forward_velocity` and `forward_progress` return 0 outside `fwd_on`; M3 translation is handled by `rotation_no_translation`, M4 by `stillness_base`.
 
-## B.5 Terminations
+## B.5 Rotating past the pan limit (M3)
 
-**P3-3 (`stalled` MUST be command-gated).** Active only when `vx_cmd` is above the deadband; the anchor resets when the command changes. Without this, every sitting episode ends as a failure at 12 s. Test: a zero-command rollout produces zero `stalled` terminations. `out_of_bounds` stays removed; sit and rotate are scored by their own metrics.
+M3 has a built-in difficulty. The claw heading is, roughly, base yaw plus the pan-joint angle. A rotation smaller than the pan joint's usable span can be done by the arm alone. A longer rotation at the same commanded rate cannot: the pan joint saturates and the base must rotate.
 
-## B.6 Command sampling
+**P3-4.**
+- Read the `shoulder_pan` soft-limit span from the asset config and record it in `docs/rest_pose.md` (call it `S_pan`).
+- In the final stage, every M3 segment MUST be long enough that the commanded rotation satisfies `|ω|·T_seg ≥ 1.5·S_pan`. Sample M3 with `|ω| ∈ [0.1, 0.3]` rad/s and take the segment duration from the dial `rotate_segment_s` (§B.7). Check the product at the lowest `|ω|` actually used, and raise the minimum duration (or the minimum `|ω|`) until it holds for every final-stage segment.
+- Success for a long M3 segment requires the claw heading rate to stay within tolerance over the **whole** post-mask segment, so the pan joint alone cannot pass it. Rotation of the base must happen; log it (metrics below).
+- Zero linear velocity still applies throughout: `rotation_no_translation` stays on.
+- Escalation (only if the policy stalls when the pan reaches its limit, logged by `pan_at_limit_fraction` and a plateau in `success/M3`): add a small reward on the **base** yaw rate tracking the command in M3, `exp(−((ω_base,ema − ω_cmd)/0.1)²)` with weight ≈ 1.0, active only after the segment has run longer than `S_pan/|ω|`. Do not add it earlier: the arm-first behavior is wanted.
 
-- Episodes become **30 s**; commands resample every 5–8 s.
-- Full mix per resample: stop 20 %, forward 30 %, rotate-only 25 %, forward + turn 25 %. Add small command noise near zero so the deadband is exercised.
-- Resets keep the Phase 2 rules: folded starts, fallen starts only through `fallen_frac` (X1), plus an optional rest-pose start at 10–15 % with zero command.
+## B.6 Terminations
 
-## B.7 Success metrics and gates
+**P3-5 (`stalled` MUST be mode-gated).** Phase 2's Euclidean `stalled` check applies only while `fwd_on` (M1, M2). It MUST NOT run in M3 or M4. Reset its anchor (position and step) at every command resample that changes the mode or enters `fwd_on`, so earlier time at rest or rotating never counts as a stall. Test: zero-command and rotate-only rollouts produce zero `stalled` terminations; a forward rollout that does not move still triggers it. `base_nan`, `base_too_high`, `time_out` unchanged. `out_of_bounds` stays removed (pitfall X6 grep applies).
 
-Metrics from §A.8 stay (same definitions, gated on upright starts, failures count). Per-segment definitions for the new modes (scored after the 2 s mask):
+## B.7 Command sampling
 
-| Mode | Segment success (training-time) |
+- **Episode length 40 s** (so a long M3 segment plus transitions fit; tunable).
+- Mode mix per resample (full difficulty): M4 20 %, M1 30 %, M3 25 %, M2 25 %. Add small command noise near zero so the deadband is exercised.
+- Per-mode values: M1 `(v_fwd, 0)`. M2 `(v_fwd, ω)` with `|ω| ∈ [0.05, 0.3]`. M3 `(0, ω)` with `|ω| ∈ [0.1, 0.3]`. M4 `(0, 0)`. The sign of `ω` is uniform.
+- Per-mode segment duration: M1, M2, M4: 5–8 s. M3: `rotate_segment_s`, a curriculum dial that starts at 5–8 s (rotation within the pan span, the arm alone can do it) and grows to the range required by P3-4.
+- **Transition coverage:** the sampler MUST produce all 12 ordered mode pairs. Log transition counts per pair each iteration; if any pair falls below 2 % of transitions, bias the sampler (e.g. sample the next mode uniformly among modes ≠ current).
+- Resets keep the Phase 2 rules: folded starts, fallen starts only via `fallen_frac` (pitfall X1), plus an optional rest-pose start (10–15 % of episodes, zero command) so M4 is directly represented.
+
+## B.8 Success metrics and curriculum gates
+
+Metrics from §A.8 stay (same definitions, upright-start gating where stated, failures always count). New per-segment metrics, scored after the 2 s mask, computed per mode:
+
+| Mode | Segment success (training-time, initial values) |
 |---|---|
-| Forward / forward + turn | claw-axis speed within ±30 % / ±35 % of `vx_cmd`; yaw as `steer_success` when turning |
-| Sit | mean base speed < 0.03 m/s (pushes on), mean joint offset from rest < 0.15 rad, upright |
-| Rotate in place | mean `r` within `max(30 %, 0.03 rad/s)` of command; base translation speed < 0.03 m/s |
+| M1 | Claw-axis speed within ±30 % of `v_fwd`; \|mean `r`\| < 0.05 rad/s |
+| M2 | Claw-axis speed within ±35 % of `v_fwd`; mean `r` within `max(35 %·\|ω\|, 0.03 rad/s)` of `ω` |
+| M3 | Mean `r` within `max(30 %·\|ω\|, 0.03 rad/s)` of `ω` over the whole post-mask segment; mean base translation speed < 0.03 m/s |
+| M4 | Mean base speed < 0.03 m/s (pushes on); `rest_pose_ok` for ≥ 90 % of the last 3 s; no `stalled`, no fall |
 
-Stage gates (monotonic, check every 100 curriculum calls, `advance ≥ 0.7`; earlier modes must stay above `hold = 0.6`; earlier-stage commands keep a 10–20 % floor of the samples; blend mixes over 50 iterations; a stage stuck 600 iterations stops the run and reports):
+Extra logged metrics: `success/M1..M4`, transition counts, settle time per transition, `base_turn_fraction` (base-yaw change ÷ claw-heading change over M3 segments), `pan_at_limit_fraction` (share of M3 time with the pan joint within 0.05 rad of a soft limit), creep distance in M4.
 
-| Stage | Command mix | Advance when |
+**Stage gates** (monotonic; check every 100 curriculum calls; advance when the stage's metric ≥ 0.7 and every earlier mode ≥ `hold` = 0.6; earlier-stage commands keep a 10–20 % floor of samples; blend mixes over 50 iterations; a stage stuck for 600 iterations stops the run and reports the gate inputs):
+
+| Stage | Commands | Advance when |
 |---|---|---|
-| 0 | Phase 2 behavior (`vx_cmd` constant 0.10) | forward and steered success ≥ 0.7 |
-| 1 | forward + stop | `success/sit` ≥ 0.7; forward/steered ≥ hold |
-| 2 | add rotate-only | `success/rotate` ≥ 0.7; others ≥ hold |
-| 3 | full mix | every mode ≥ 0.7 |
-| 4 | full mix + all physics dials at final values | none; train to the fixed iteration count |
+| 0 | M1, M2 only (`vx_cmd ≡ v_fwd`), the whole Phase 2 recipe running (all its dials) | Phase 2 dials at their ceilings **and** `success/M1`, `success/M2` ≥ 0.7 |
+| 1 | add M4 | `success/M4` ≥ 0.7 |
+| 2 | add M3 with short segments (rotation within `S_pan`) | `success/M3` ≥ 0.7 |
+| 3 | M3 segments grow via `rotate_segment_s` up to the P3-4 requirement | `success/M3` ≥ 0.7 at the final length |
+| 4 | full mix, every transition pair, all physics dials at final values | none; train to the fixed iteration count |
 
-Phase 2's dials (`v_target`/friction/difficulty/`yaw_rate_max`) keep running underneath unchanged.
+Phase 2's physics dials (`v_fwd` ramp, friction, `difficulty`/`fallen_frac`/`push_scale`) keep running underneath unchanged; no dial moves backward.
 
-## B.8 Evaluation and acceptance
+## B.9 Evaluation and acceptance
 
-Same setup as §A.13, with the extra scenarios below. Fallen-start recovery and straight/steered crawl keep their Phase 2 thresholds.
+Same setup as §A.13 (deterministic policy, 100 envs per scenario, friction 0.5 / 0.8 / 1.2, no sensor noise, failures never dropped).
 
 | Scenario | Acceptance |
 |---|---|
-| Sit (zero command 20 s, from crawl and from rest; pushes on and off) | After 3 s: base speed < 0.01 m/s pushless (loose bound with pushes, reported), joint velocities near zero, joints within 0.15 rad of rest, zero `stalled` |
-| Rotate in place (`±0.2`, or the reachable maximum) | `r` within ±30 %; base translation < 0.15 m per 10 s |
-| Forward + turn (`vx_cmd 0.10`, `±0.1`, plus other points) | Speed and `r` each within ±35 % |
-| Transitions (crawl → sit → rotate → crawl+turn → sit → crawl) | Each settles within 3 s; no flips; no stuck states |
+| M1 forward | Phase 2 straight-crawl thresholds |
+| M2 forward + turn (`ω = ±0.1`, `±0.2`, the highest reachable) | Speed within ±35 % of `v_fwd`; mean `r` within `max(35 %, 0.03 rad/s)` of `ω`; no early terminations |
+| M3 rotate in place (`ω = ±0.2`, 30 s so the pan limit is exceeded) | Mean `r` within ±30 % over the whole segment; base translation < 0.15 m per 10 s; **base yaw change ≥ (total commanded rotation − `S_pan`) × 0.7** |
+| M4 rest (20 s, from crawl, from M3 and from a rest start; pushes off and on) | After 3 s: base speed < 0.01 m/s pushless (loose bound with pushes, reported), joint velocities near zero, `rest_pose_ok` holds, zero `stalled` |
+| **Transitions** | A scripted schedule that visits **all 12 ordered pairs** of {M1, M2, M3, M4} (each pair held ≥ 8 s, M3 ≥ 15 s). For each: settles into the new behavior within 3 s (M3 within 5 s), no flips, no stuck states, no unintended creep when entering M4, no `stalled` outside M1/M2. Report a 4×4 table of settle times |
+| Fallen starts | `recovery_success` ≥ 0.9× the Phase 2 value |
 | Regression | Phase 2 scenarios no more than 10–15 % worse |
 
-## B.9 Ladder and deliverables
+## B.10 Ladder, deliverables, tests
 
-Rungs (each from scratch, pass before continuing): **L1** `vx_cmd` input with commands always forward (must reproduce Phase 2); **L2** add stop/sit with `stalled` gating and rest pose; **L3** add rotate-only; **L4** full mix; **L5** robustness and two-seed reproduction. Log every run in `docs/phase3_report.md`.
+**Ladder (each rung from scratch, 4096 envs; must pass before the next):**
 
-Deliverables: code, scripts (`play.py` accepts `--vx` and `--yaw_rate`), best checkpoint and ONNX/TorchScript export, videos (crawl, sit, rotate, steered crawl, transitions), `docs/rest_pose.md`, updated `policy_io.md` (26-D), `docs/phase3_report.md`, tests (26-D observation, command-mix statistics, zero-command/`stalled` test, short training smoke run).
+| Rung | Change | Pass criteria |
+|---|---|---|
+| L1 | `vx_cmd` input, commands only M1/M2 | Reproduces Phase 2 results (within 10–15 %) |
+| L2 | Add M4 with mode-gated `stalled`, rest pose, stillness rewards | M4 acceptance; M1/M2 still ≥ 0.9× L1; zero `stalled` in M4 |
+| L3 | Add M3 with short segments | `success/M3` ≥ 0.7; translation limit holds |
+| L4 | Grow M3 segments past `S_pan` | `base_turn_fraction` > 0; M3 acceptance incl. base-yaw requirement (apply the §B.5 escalation only on evidence) |
+| L5 | Full mix, all 12 transitions, physics dials | §B.9 transition table; all scenarios |
+| L6 | Final recipe from scratch, two seeds | All of §B.9 on both seeds |
 
-## B.10 Decisions already made
+**Deliverables:** code on top of the Phase 2 code; `play.py` with `--vx` and `--yaw_rate` (and a `--mode` shortcut for M1–M4); the evaluation script with the scenarios above, including the scripted 12-pair transition schedule; best checkpoint plus ONNX/TorchScript export; TensorBoard logs; the final training config; videos (M1, M2 left/right, M3 including the pan-limit moment, M4, and the full transition schedule); `docs/rest_pose.md`; `policy_io.md` updated to 26-D with the two commands and deadband semantics; `docs/phase3_report.md` (experiment log: rung, tuned values, metrics, why variants failed).
 
-Forward + turn is required; sit from zero command only; pushes stay on during sit (graded loose/strict); `stalled` is command-gated; train from scratch; no position box.
+**Tests (`pytest`):** 26-D observation; mode-mix sampler statistics (mix weights, per-mode values, per-mode durations, all 12 transition pairs occur); deadband indicator tests; `stalled` gating (zero in M3/M4, still fires in M1/M2); reward-gate tests (`yaw_rate_tracking` is 0 in M4; `forward_velocity` is 0 outside `fwd_on`; `rest_pose` is 0 when tipped); P3-4 check that the final M3 segment length satisfies `|ω|·T_seg ≥ 1.5·S_pan`; short training smoke run writing a checkpoint.
+
+## B.11 Watch list
+
+| ID | Risk | Check / mitigation |
+|---|---|---|
+| V1 | M3 stalls when the pan reaches its limit (arm-only turning) | `pan_at_limit_fraction` high with `base_turn_fraction` ≈ 0 and `success/M3` plateaued: apply the §B.5 escalation; also try longer exposure at the intermediate `rotate_segment_s` stage |
+| V2 | M4 creeps, or a biased gyro makes the robot believe it is turning (hardware only) | Creep metric; deadband; bias robustness is deferred to the sensor-noise pass (§D) |
+| V3 | `yaw_rate_tracking` is farmed while resting | It is gated off in M4; test it |
+| V4 | `stalled` kills rest or rotation episodes | Mode-gated (P3-5); test it |
+| V5 | A mode starves in the mix or a transition pair is never learned | Transition-count logging, rehearsal floor, sampler bias |
+| V6 | Entering M4 from a tipped or half-turned posture | Recovery precedence; fallen starts keep running underneath; M4 acceptance from M3 and from crawl |
+| V7 | Tail-first crawl returns in M1/M2 (Phase 2 watch item W2) | Keep the logged `v_c < −0.02` fraction |
+
+## B.12 Decisions already made by the owner
+
+1. Four commanded behaviors: forward at constant speed, forward + turn at constant speed and yaw rate, turn with zero linear velocity (arm first, then the base at the pan limit), and rest on the base when both commands are zero. Variable forward speed moves to Phase 4.
+2. Rest comes from a zero command only.
+3. Pushes stay on during training; rest is graded loose and strict.
+4. Train from scratch; no position box; no scripted feasibility gates.
+
+---
+
+# PHASE 4 — Variable forward speed (placeholder, to be specified later)
+
+Out of scope until Phase 3 passes. Intent only:
+- Make `vx_cmd` continuous in [0, 0.15] m/s instead of {0, `v_fwd`}. The actor layout does not change (the input exists from Phase 3).
+- `forward_velocity`, `forward_progress`, the success metrics, and the stage gates target `vx_cmd` instead of `v_fwd`; the `v_fwd` ramp is superseded by sampled commands.
+- Transitions between speeds, and between speeds and the other behaviors, become part of the acceptance table.
+- The same rules apply: train from scratch, ladder, X1–X8 pitfalls, mode-gated `stalled`.
 
 ---
 
