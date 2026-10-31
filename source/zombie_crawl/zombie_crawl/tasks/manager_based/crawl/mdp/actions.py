@@ -62,6 +62,23 @@ class OffsetEMAJointPositionToLimitsAction(EMAJointPositionToLimitsAction):
             clipped >= 0, clipped * self._up_span, clipped * self._down_span
         )
         alpha = self._alpha
+        # phase-3 (B-12): under a zero command the joint-position target is low-passed
+        # HARDER (ema_alpha_zero). rsl-rl's policy noise is one global per-dim scalar, so
+        # the gait's exploration sigma (~1.1 on the +/-1 clip) physically prevents rest
+        # (needs ~0.05): five full reward-shaping configs, 3000 iters each, left
+        # m4_qerr_max frozen at 2.76. The command filter attenuates SAMPLED noise by the
+        # IIR gain a/(2-a) while the policy's MEAN still sets the steady-state target --
+        # rest becomes reachable without muting what the policy commands (and real
+        # actuators have command filters, so it is sim2real-plausible).
+        za = getattr(self.cfg, "ema_alpha_zero", None)
+        if za is not None:
+            term = self._env.command_manager.get_term("yaw_rate_cmd")
+            zero = getattr(term, "zero_cmd_raw", None)
+            if zero is not None:
+                base = torch.as_tensor(self._alpha, device=self.device).expand(self.num_envs, 1)
+                alpha = torch.where(
+                    zero.unsqueeze(-1) > 0.5, torch.full_like(base, float(za)), base
+                )
         ema = alpha * target + (1.0 - alpha) * self._prev_applied_actions
         limits = self._asset.data.soft_joint_pos_limits.torch
         self._processed_actions[:] = torch.clamp(
@@ -80,3 +97,8 @@ class OffsetEMAJointPositionToLimitsActionCfg(EMAJointPositionToLimitsActionCfg)
 
     neutral: dict[str, float] = None
     """Absolute joint positions (rad) that a zero action should command."""
+
+    ema_alpha_zero: float | None = None
+    """Extra EMA weight used while the command is zero (M4 rest). None = same as alpha.
+    Small values low-pass the SAMPLED exploration noise under zero command so rest is
+    physically reachable despite the global policy std (see process_actions, B-12)."""

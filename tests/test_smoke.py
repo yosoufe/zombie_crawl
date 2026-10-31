@@ -72,11 +72,12 @@ def test_obs_action_dimensions(venv_python):
         m = re.match(r"(obs_group \w+|action_dim) (\d+)", line)
         if m:
             dims[m.group(1)] = int(m.group(2))
-    # 25 = projected_gravity(3) + base_ang_vel(3) + joint_pos(6) + joint_vel(6)
-    #      + last_action(6) + yaw_rate_cmd(1); gait_clock term is None by default
-    assert dims.get("obs_group policy") == 25, f"unexpected policy obs dim: {dims}"
-    # 6 = policy privileged set + claw_heading_rate (r) -- sim-only, never an actor input
-    assert dims.get("obs_group critic") == 6, f"unexpected critic (privileged) obs dim: {dims}"
+    # 26 = projected_gravity(3) + base_ang_vel(3) + joint_pos(6) + joint_vel(6)
+    #      + last_action(6) + yaw_rate_cmd(1) + vx_cmd(1) [phase 3, B.6]; gait_clock None
+    assert dims.get("obs_group policy") == 26, f"unexpected policy obs dim: {dims}"
+    # 10 = base_lin_vel(3) + base_height(1) + ground_friction(1) + claw_heading_rate(1)
+    #      + mode_onehot(4) [phase 3] -- all sim-only, never actor inputs
+    assert dims.get("obs_group critic") == 10, f"unexpected critic (privileged) obs dim: {dims}"
     assert dims.get("action_dim") == 6, f"unexpected action dim: {dims}"
 
 
@@ -155,17 +156,19 @@ def test_play_loads_checkpoint(venv_python):
 
 
 def test_yaw_rate_command_training_smoke(venv_python):
-    """A short default run boots the yaw-rate command term, trains without NaNs, and the
-    stage-0 lock keeps EVERY command exactly zero (motion first, steering last)."""
+    """A short default run boots the phase-3 mode-mix command term, trains without NaNs,
+    and the closed steering dial keeps |omega| inside the yaw deadband (motion first,
+    steering last)."""
     proc = run_script(
         [
             str(SCRIPTS / "train.py"),
             "--task",
             "Zombie-Crawl-SO100-v0",
+            "--rl_library",
+            "rsl_rl",
             "--num_envs",
             "32",
-            "--max_iterations",
-            "3",
+            "agent.max_iterations=3",
             "--headless",
             "--seed",
             "0",
@@ -177,11 +180,12 @@ def test_yaw_rate_command_training_smoke(venv_python):
         timeout=2400,
     )
     assert proc.returncode == 0, f"train failed:\n{proc.stdout[-4000:]}\n{proc.stderr[-4000:]}"
-    assert "UniformYawRateCommand" in proc.stdout, "command term not instantiated"
+    assert "ModeMixCommand" in proc.stdout, "phase-3 command term not instantiated"
     log_dir = REPO_ROOT / "logs" / "rsl_rl" / "smoke_test_yawrate"
     assert list(log_dir.rglob("model_*.pt")), f"no checkpoint under {log_dir}"
     # 3 iterations cannot reach difficulty 0.75 -> stage ladder must still be at stage 0:
-    # yaw_rate_max dial == 0 and every logged command magnitude == 0
+    # yaw_rate_max dial == 0, mode ladder stage 0 (M1/M2 only), and every logged |omega|
+    # sits at/below the yaw deadband (sub-deadband M1 noise allowed; no steering signal)
     from tensorboard.backend.event_processing import event_accumulator
 
     tfe = sorted(log_dir.rglob("events.out.tfevents.*"))[-1]
@@ -190,16 +194,23 @@ def test_yaw_rate_command_training_smoke(venv_python):
     tags = ea.Tags()["scalars"]
     for tag in (
         "Metrics/yaw_rate_cmd/abs",
+        "Metrics/yaw_rate_cmd/vx_abs",
         "Metrics/yaw_rate_cmd/resamples_per_episode",
+        "Metrics/yaw_rate_cmd/frac_M1",
+        "Metrics/yaw_rate_cmd/frac_M4",
         "Curriculum/yaw_rate_stage/yaw_rate_max",
         "Curriculum/yaw_rate_stage/stage",
+        "Curriculum/mode_stage/stage",
         "Curriculum/crawl_metrics/crawl_success",
         "Curriculum/difficulty/fallen_frac",
     ):
         assert tag in tags, f"missing {tag} (term metrics not logged)"
     assert all(
-        s.value == 0.0 for s in ea.Scalars("Metrics/yaw_rate_cmd/abs")
-    ), "stage-0 lock violated: non-zero yaw-rate command issued!"
+        s.value <= 0.05 + 1e-6 for s in ea.Scalars("Metrics/yaw_rate_cmd/abs")
+    ), "closed-dial lock violated: |omega| above the yaw deadband at iteration ~0!"
+    assert all(
+        s.value == 0.0 for s in ea.Scalars("Curriculum/mode_stage/stage")
+    ), "mode ladder advanced before the phase-2 ceilings were reached"
     assert all(
         s.value == 0.0 for s in ea.Scalars("Curriculum/yaw_rate_stage/yaw_rate_max")
     ), "yaw_rate_max dial moved before its gate"
@@ -212,8 +223,9 @@ def test_yaw_rate_command_training_smoke(venv_python):
 
 
 def test_command_sampling_helper(venv_python):
-    """AGENTS.md pre-launch smoke gate: zero fraction ~0.2, |cmd| <= yaw_rate_max, both
-    signs present, pinning freezes the draw."""
+    """AGENTS.md pre-launch smoke gate (phase 3): motion-stage zero-command fraction is
+    0.0, |omega| <= yaw_rate_max, both signs, all four modes + 12 transition pairs under
+    the full mix, pin()/pin_mode() freeze the draw."""
     proc = run_script([str(HELPERS / "check_command.py"), "--num_envs", "16", "--headless"])
     assert proc.returncode == 0, f"helper failed:\n{proc.stdout}\n{proc.stderr}"
     assert "[helper] OK" in proc.stdout

@@ -28,6 +28,24 @@ NUM_STEPS_PER_ENV = 40
 
 
 @configclass
+class _GaussianDistCfg(RslRlMLPModelCfg.GaussianDistributionCfg):
+    """State-DEPENDENT std (phase-3 B-11): the vanilla Gaussian std is one global number
+    per action dim, so the gait's exploration (sigma ~1.1 on the +/-1 clip) physically
+    prevented rest -- rest needs sigma ~0.05 while crawling needs ~1, in one policy. The
+    heteroscedastic variant lets the MLP output a per-state std (state-conditional noise:
+    loud during M1/M2 gait, near-deterministic under M4's zero command). ``std_range`` is
+    the rsl-rl clamp the Isaac wrapper doesn't expose (passed via ``resolve_class``);
+    2.0 bounds the phase-3 noise-exploit (the rest kernel let PPO grow the global std to
+    500+). Trained checkpoints are migrated by expanding the final layer (mean rows) and
+    initializing the std head at init_std (see ``model_*_hetero.pt``)."""
+
+    # Heteroscedastic was tried (B-11): rsl-rl's PPO let the state-dependent std saturate
+    # at the cap within 600 iters (LL gradient on outliers + no std control), and rest
+    # still never formed. Plain clamped Gaussian until a std-EMA control exists.
+    std_range: tuple[float, float] = (0.1, 2.0)
+
+
+@configclass
 class CrawlPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """PPO runner configuration for the zombie crawl task."""
 
@@ -53,7 +71,7 @@ class CrawlPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         obs_normalization=True,
         # init_std 0.4 (was 1.0): on the +/-1-clipped action space std=1.0 saturated the clip and,
         # in run 2026-10-09_11-04-48, later blew up 0.08 -> 0.49 at iter ~710 (reward cliff +9 -> -11).
-        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(init_std=0.6),
+        distribution_cfg=_GaussianDistCfg(init_std=0.6),
     )
     critic = RslRlMLPModelCfg(
         hidden_dims=[256, 128, 64],

@@ -70,6 +70,7 @@ def stalled(
     min_displacement: float = 0.05,
     stall_time_s: float = 12.0,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    mode_gate: bool = False,
 ) -> torch.Tensor:
     """True if the base has not moved ``min_displacement`` (EUCLIDEAN, horizontal) from the
     window anchor within ``stall_time_s`` (P2-8).
@@ -83,6 +84,13 @@ def stalled(
     window the env either terminates (no movement -> failure, non-bootstrapped, so
     "doing nothing" is bad rather than a free ride) or re-anchors (anchor = now) and
     continues, giving a rolling 12 s window.
+
+    Phase 3 (P3-5, ``mode_gate=True``): the check runs ONLY while the command is forward
+    (M1/M2 ``fwd_on``). It MUST NOT fire in M3 (rotate in place: zero translation is the
+    GOAL) or M4 (rest: standing still is the GOAL). The anchor is re-anchored (position +
+    step = now) on every command resample and on every mode change, so earlier time spent
+    resting or rotating never counts as a stall when the robot re-enters a forward mode.
+    With no mode term present the gating degrades to always-active (phase-2 behavior).
     """
     asset = env.scene[asset_cfg.name]
     pos_xy = asset.data.root_pos_w.torch[:, :2]
@@ -93,12 +101,31 @@ def stalled(
         env.zombie_stall_anchor_xy = pos_xy.clone()
         env.zombie_stall_anchor_step = el.clone()
         return torch.zeros(pos_xy.shape[0], dtype=torch.bool, device=pos_xy.device)
+    active = torch.ones(pos_xy.shape[0], dtype=torch.bool, device=pos_xy.device)
+    if mode_gate:
+        from .rewards import mode_term
+
+        term = mode_term(env)
+        if term is not None and hasattr(term, "fwd_on"):
+            active = term.fwd_on > 0.5
+            # re-anchor on every resample and every mode change (P3-5): time accumulated
+            # while resting/rotating must never count toward a forward-mode stall
+            prev = getattr(env, "zombie_stall_prev_mode", None)
+            if prev is None or prev.shape[0] != pos_xy.shape[0]:
+                env.zombie_stall_prev_mode = term.mode.clone()
+                change = term.just_resampled.clone()
+            else:
+                change = term.just_resampled | (term.mode != prev)
+                prev.copy_(term.mode)
+            if bool(change.any()):
+                anchor_xy[change] = pos_xy[change]
+                env.zombie_stall_anchor_step[change] = el[change]
     stall_steps = int(round(stall_time_s / (env.cfg.decimation * env.cfg.sim.dt)))
     disp = (pos_xy - anchor_xy).norm(dim=1)
     elapsed = el - env.zombie_stall_anchor_step
     past = elapsed > stall_steps
-    terminate = past & (disp < min_displacement)
-    re_anchor = past & ~terminate
+    terminate = past & (disp < min_displacement) & active
+    re_anchor = past & ~terminate & active
     if bool(re_anchor.any()):
         anchor_xy[re_anchor] = pos_xy[re_anchor]
         env.zombie_stall_anchor_step[re_anchor] = el[re_anchor]

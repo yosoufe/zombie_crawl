@@ -67,6 +67,159 @@ def yaw_rate_resample_flag(env: ManagerBasedEnv) -> torch.Tensor | None:
     return None
 
 
+def mode_term(env: ManagerBasedEnv):
+    """The command term instance (phase-3 ModeMixCommand) or None if unavailable."""
+    cm = getattr(env, "command_manager", None)
+    if cm is not None and "yaw_rate_cmd" in cm.active_terms:
+        return cm.get_term("yaw_rate_cmd")
+    return None
+
+
+def mode_indicators(env: ManagerBasedEnv, gate_ramp_s: float = 0.5, settle_ramp_s: float = 2.0) -> dict:
+    """Smoothed mode indicators for the phase-3 reward gates (B.4).
+
+    Raw indicators come from the command term's deadbands (P3-1). Every indicator-based
+    gate is RAMPED over ``gate_ramp_s`` after each resample (smooth gating rule: no hard
+    reward discontinuities when the mode flips), and the zero-command stillness penalties
+    use the slower ``settle_ramp_s`` ramp (settle grace: deceleration is unavoidable).
+
+    A phase-2 term (no mode attributes) degrades gracefully: ``fwd_on`` is always 1, the
+    zero/rotate indicators are 0 -- i.e. phase-2 behavior is recovered exactly.
+    """
+    n = env.num_envs
+    dev = env.device
+    term = mode_term(env)
+    if term is None or not hasattr(term, "fwd_on"):
+        ones = torch.ones(n, device=dev)
+        return {"fwd_on": ones, "is_zero_cmd": torch.zeros(n, device=dev), "is_rotate_only": torch.zeros(n, device=dev)}
+    timer = getattr(env, "zombie_time_since_resample", None)
+    if timer is None or timer.shape[0] != n:
+        timer = torch.full((n,), 1e9, device=dev)
+    ramp = torch.clamp(timer / max(gate_ramp_s, 1e-6), min=0.0, max=1.0)
+    settle = torch.clamp(timer / max(settle_ramp_s, 1e-6), min=0.0, max=1.0)
+    fwd = term.fwd_on
+    zero = term.zero_cmd_raw
+    rot = term.rotate_raw
+    return {
+        "fwd_on": fwd * ramp,
+        "is_zero_cmd": zero * ramp,
+        "is_rotate_only": rot * ramp,
+        # un-ramped pair for membership tests (M4 = zero, M3 = rotate): tracking/pose gates
+        "zero_raw": zero,
+        "rotate_raw": rot,
+        # stillness terms: zero-command indicator with the 2 s settle grace (B.4)
+        "settle": zero * settle,
+    }
+
+
+def rest_pose_ok(
+    env: ManagerBasedEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """``rest_pose_ok`` (P3-3): flat, base at rest height, every joint near q_rest.
+
+    ``up >= rest_up_thresh`` AND ``|base_z - h_rest| <= rest_height_tol`` AND every joint
+    within ``rest_joint_tol`` of the rest pose (URDF zero = ``default_joint_pos``). Used
+    by the rest reward, the M4 metric and acceptance.
+    """
+    asset = env.scene[asset_cfg.name]
+    up = flatness_gate(env, asset_cfg)
+    z = asset.data.root_pos_w.torch[:, 2]
+    q_err = (asset.data.joint_pos.torch - asset.data.default_joint_pos.torch).abs()
+    h_rest = float(getattr(env.cfg, "rest_height", 0.0037))
+    ok_up = up >= float(getattr(env.cfg, "rest_up_thresh", 0.95))
+    ok_z = (z - h_rest).abs() <= float(getattr(env.cfg, "rest_height_tol", 0.01))
+    ok_q = (q_err <= float(getattr(env.cfg, "rest_joint_tol", 0.15))).all(dim=1)
+    return (ok_up & ok_z & ok_q).to(up.dtype)
+
+
+def rotation_no_translation(
+    env: ManagerBasedEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """M3 penalty (B.4): ``||v_base,xy||^2`` while the command is rotate-only.
+
+    Rotating in place must not translate; the gate (and its 0.5 s ramp) is applied here
+    so the term is exactly zero in M1/M2/M4.
+    """
+    v = _base_lin_vel_w(env, asset_cfg)
+    ind = mode_indicators(env)
+    return (v[:, 0] ** 2 + v[:, 1] ** 2) * ind["is_rotate_only"]
+
+
+def stillness_base(
+    env: ManagerBasedEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """M4 penalty (B.4): ``||v_base||^2`` under a zero command, with the 2 s settle grace."""
+    v = _base_lin_vel_w(env, asset_cfg)
+    ind = mode_indicators(env)
+    return v.pow(2).sum(dim=1) * ind["settle"]
+
+
+def stillness_joints(
+    env: ManagerBasedEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """M4 penalty (B.4): ``||qdot||^2`` under a zero command, with the 2 s settle grace."""
+    qdot = env.scene[asset_cfg.name].data.joint_vel.torch
+    ind = mode_indicators(env)
+    return qdot.pow(2).sum(dim=1) * ind["settle"]
+
+
+def rest_pose(
+    env: ManagerBasedEnv,
+    sigma: float = 0.3,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """M4 reward (B.4): ``exp(-||q - q_rest||^2 / sigma^2)`` under a zero command.
+
+    Gated by a SMOOTH up >= 0.9 ramp (recovery precedence: a tipped robot earns nothing
+    here until level) and the zero-command indicator; q_rest is the folded rest pose
+    (= ``default_joint_pos``).
+    """
+    asset = env.scene[asset_cfg.name]
+    q_err = asset.data.joint_pos.torch - asset.data.default_joint_pos.torch
+    up = flatness_gate(env, asset_cfg)
+    smooth_up = torch.clamp((up - 0.85) / 0.10, min=0.0, max=1.0)  # 0 at up<=0.85, 1 at up>=0.95
+    # un-ramped zero indicator (phase-3 calibration): the 2 s settle ramp on is_zero_cmd
+    # inverted the rest gradient -- the flailing transit through the rest basin pays
+    # immediately while the settled folded pose waits 2 s for payment, and PPO learned to
+    # prop up (z 0.04) instead of fold. The kernel itself is smooth in q; no ramp needed.
+    ind = mode_indicators(env)
+    return torch.exp(-q_err.pow(2).sum(dim=1) / sigma**2) * smooth_up * ind["zero_raw"]
+
+
+def rest_deviation(
+    env: ManagerBasedEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """M4 repulsion (phase-3 calibration): raw max joint deviation from the folded rest
+    pose under a zero command. Linear -- no kernel plateau: crawling through an M4
+    window pays ~-2.8 where rest pays ~-0.1 (the exp-kernel alone let the policy golf
+    half-curled postures at sigma-scaled cost).
+    """
+    asset = env.scene[asset_cfg.name]
+    q_err = (asset.data.joint_pos.torch - asset.data.default_joint_pos.torch).abs().amax(dim=1)
+    ind = mode_indicators(env)
+    return q_err * ind["is_zero_cmd"] * ind["zero_raw"]  # soft (ramped x raw) repulsion
+
+
+def stop_actions(env: ManagerBasedEnv) -> torch.Tensor:
+    """M4 stop-encoder (phase-3 calibration): -||a||^2 under a zero command.
+
+    The trained actor's MEAN was stuck at the +/-1 action clip in every mode -- the fold
+    distance gradient (max ~0.2/step) could not rotate a saturated mean inside PPO's clip.
+    The action itself is the direct knob: limp (a ~= 0) is the passive folded equilibrium
+    (P3-3), so paying for zero action under zero command converts rest from a pose-search
+    problem into an action-shrink problem.
+    """
+    am = env.action_manager
+    a = am.action if isinstance(am.action, torch.Tensor) else torch.cat(am.action, dim=-1)
+    ind = mode_indicators(env)
+    return a.pow(2).sum(dim=1) * ind["zero_raw"]
+
+
 def _claw_yaw_and_valid(
     env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=("wrist",))
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -200,6 +353,7 @@ def _update_claw_heading_rate(env: ManagerBasedEnv, dt: float, tau_r: float) -> 
     dpsi = _wrap_to_pi(psi - env.zombie_psi_prev)
     bad = (valid != env.zombie_arrow_valid_prev) | (dpsi.abs() > 0.5)
     dpsi = torch.where(bad, torch.zeros_like(dpsi), dpsi)
+    env.zombie_dpsi_last = dpsi  # consumed by metrics (base_turn_fraction, V3 watch)
     env.zombie_r_ema.add_((dpsi / max(dt, 1e-9) - env.zombie_r_ema) * min(1.0, dt / tau_r))
     env.zombie_psi_prev = psi
     env.zombie_arrow_valid_prev = valid
@@ -211,6 +365,7 @@ def forward_velocity_exp(
     env: ManagerBasedEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     cap_at_target: bool = False,
+    gate_mode: bool = False,
 ) -> torch.Tensor:
     """Forward-velocity reward: ``tanh(v_c / v_target)``, posture-gated. "Move along your claw."
 
@@ -233,7 +388,10 @@ def forward_velocity_exp(
     # cap_at_target flattens the reward above v_target (no gradient for overshooting);
     # the backward branch stays uncapped so reversing keeps paying its full negative.
     x_pos = torch.clamp(v_c / target, max=1.0) if cap_at_target else v_c / target
-    return torch.where(v_c > 0, up * torch.tanh(x_pos), torch.tanh(v_c / target))
+    out = torch.where(v_c > 0, up * torch.tanh(x_pos), torch.tanh(v_c / target))
+    if gate_mode:  # B.4: forward terms return 0 outside fwd_on (M3/M4)
+        out = out * mode_indicators(env)["fwd_on"]
+    return out
 
 
 def forward_progress_lpf(
@@ -242,6 +400,7 @@ def forward_progress_lpf(
     normalize: bool = True,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     cap: bool = False,
+    gate_mode: bool = False,
 ) -> torch.Tensor:
     """Exponentially filtered forward progress along the claw axis (a ``tau_s``-second window).
 
@@ -281,6 +440,8 @@ def forward_progress_lpf(
         out = out / torch.clamp(get_v_target(env), min=1e-3)
     if cap:
         out = torch.clamp(out, max=1.0)
+    if gate_mode:  # B.4: forward terms return 0 outside fwd_on (M3/M4)
+        out = out * mode_indicators(env)["fwd_on"]
     return out
 
 
@@ -326,7 +487,13 @@ def yaw_rate_tracking(
     fwd = torch.clamp(torch.tanh(v_c / target), min=0.0, max=1.0)
     mask = torch.clamp(env.zombie_time_since_resample / yaw_mask_s, min=0.0, max=1.0)
     bump = torch.exp(-((env.zombie_r_ema - cmd) / sigma) ** 2)
-    return up * fwd * mask * bump
+    # phase-3 mode gates (B.4): M1/M2 keep the forward-speed factor; M3 replaces it with 1
+    # (rotation IS the goal there); M4 never pays. Gated-off entirely if no mode term
+    # (phase-2 tree): fwd_on indicator is then all-ones and behavior is exactly phase 2.
+    ind = mode_indicators(env)
+    fwd_factor = torch.where(ind["is_rotate_only"] > 0.5, torch.ones_like(fwd), fwd)
+    active = torch.clamp(ind["fwd_on"] + ind["is_rotate_only"], max=1.0)
+    return up * fwd_factor * mask * bump * active
 
 
 def lateral_velocity(

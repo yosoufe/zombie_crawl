@@ -84,12 +84,22 @@ def reset_start_pose(
     f = fallen_frac_override
     if f is None:
         f = env.extras.get("fallen_frac", None)
+    # phase 3 (B.7): rest-pose starts (folded at rest height, zero command drawn normally)
+    # come from env.extras["rest_frac"] (set by the mode_stage curriculum; 0 = phase-2)
+    r = env.extras.get("rest_frac", None)
     if f is not None and len(names) >= 3:
         f = float(f)
-        weights_list = [1.0 - f, f / 2.0, f / 2.0]
-        weights = torch.tensor(weights_list, device=device)
+        if len(names) >= 4 and r is not None:
+            r = float(min(max(float(r), 0.0), 1.0 - f))
+            weights_list = [1.0 - f - r, f / 2.0, f / 2.0, r]
+        else:
+            weights_list = [1.0 - f, f / 2.0, f / 2.0]
+        # phase 3 added the 4th (rest) pose: legacy 3-entry lists pad with zero weight
+        weights_list += [0.0] * (len(names) - len(weights_list))
+        weights = torch.tensor(weights_list[: len(names)], device=device)
     elif pose_weights is not None:
-        weights = torch.tensor(pose_weights, device=device)
+        pw = list(pose_weights) + [0.0] * (len(names) - len(pose_weights))
+        weights = torch.tensor(pw[: len(names)], device=device)
     elif len(names) >= 3:
         # X1: no curriculum fraction and no explicit weights -> folded only, ALWAYS
         weights = torch.tensor([1.0] + [0.0] * (len(names) - 1), device=device)
@@ -97,6 +107,15 @@ def reset_start_pose(
         weights = torch.full((len(names),), 1.0 / len(names), device=device)
     weights = weights / weights.sum()
     pose_ids = torch.multinomial(weights, n, replacement=True)
+    # phase 3: rest-start envs must actually be graded at rest -- queue their first
+    # command segment for M4 (consumed by ModeMixCommand._sample)
+    if len(names) >= 4:
+        rest_rows = env_ids[pose_ids == 3]
+        if rest_rows.numel():
+            prev = env.extras.get("force_m4_ids")
+            env.extras["force_m4_ids"] = (
+                rest_rows.clone() if prev is None or not len(prev) else torch.cat([prev, rest_rows])
+            )
 
     # base pose
     positions = torch.zeros(n, 3, device=device)
@@ -109,8 +128,9 @@ def reset_start_pose(
         for jname, jval in pose["joint_pos"].items():
             idx = asset.joint_names.index(jname)
             joint_pos[i, idx] = jval
-    # record per-env start class for the success metrics (upright vs fallen episodes)
-    metrics.set_started_fallen(env, env_ids, pose_ids.to(device) > 0)
+    # record per-env start class for the success metrics (upright vs fallen episodes).
+    # Only on_side/face_down are fallen -- the phase-3 "rest" start (id 3) is UPRIGHT.
+    metrics.set_started_fallen(env, env_ids, (pose_ids == 1) | (pose_ids == 2))
 
     # randomization: yaw, xy offset, joint noise (kept at the phase-1 values; the old
     # zombie_ref_yaw command draw is gone -- the command is a yaw RATE now, drawn by the
@@ -127,6 +147,12 @@ def reset_start_pose(
         # soft limits layout in 3.0: (num_envs, num_joints, 2) = [low, high]
         limits = asset.data.soft_joint_pos_limits.torch
         joint_pos = joint_pos.clamp_(limits[0, :, 0], limits[0, :, 1])
+    # phase 3 (B.7): rest starts are EXACT (no joint noise) so rest_pose_ok is reachable
+    # immediately and the M4 metric measures the policy, not spawn jitter
+    if len(names) >= 4:
+        rest_rows = pose_ids == 3
+        if bool(rest_rows.any()):
+            joint_pos[rest_rows] = 0.0
 
     # Isaac Lab 3.0: quaternions are XYZW; write_*_to_sim is superseded by the *_index variants
     orientations = math_utils.quat_from_euler_xyz(orientations_rpy[:, 0], orientations_rpy[:, 1], orientations_rpy[:, 2])

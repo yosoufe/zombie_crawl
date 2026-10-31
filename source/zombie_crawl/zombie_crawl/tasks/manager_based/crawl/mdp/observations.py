@@ -67,6 +67,36 @@ def yaw_rate_cmd(env: ManagerBasedEnv, scale: float = 1.0 / 0.3) -> torch.Tensor
     return torch.zeros(env.num_envs, 1, device=env.device)
 
 
+def vx_cmd(env: ManagerBasedEnv, scale: float = 1.0 / 0.15) -> torch.Tensor:
+    """The commanded base forward speed [m/s] scaled by 1/0.15 (phase 3, B.6).
+
+    Shape ``(num_envs, 1)``. With ``ModeMixCommand`` active this is the second command
+    input; the policy group grows 25-D -> 26-D. Falls back to zeros when the command
+    term is the legacy phase-2 one (keeps ``check_dims`` runs of old trees alive).
+    """
+    cm = getattr(env, "command_manager", None)
+    if cm is not None and "yaw_rate_cmd" in cm.active_terms:
+        term = cm.get_term("yaw_rate_cmd")
+        if hasattr(term, "vx_command"):
+            return term.vx_command * scale
+    return torch.zeros(env.num_envs, 1, device=env.device)
+
+
+def mode_onehot_priv(env: ManagerBasedEnv) -> torch.Tensor:
+    """Privileged critic input: the current behavior-mode one-hot (M1..M4), ``(N, 4)``.
+
+    From :class:`~.commands.ModeMixCommand`; MUST NOT enter the policy group (the real
+    robot's command stream is ``(vx, yawrate)``, not a mode label -- the mode is implied
+    by which channel is deadbanded).
+    """
+    cm = getattr(env, "command_manager", None)
+    if cm is not None and "yaw_rate_cmd" in cm.active_terms:
+        term = cm.get_term("yaw_rate_cmd")
+        if hasattr(term, "mode_onehot"):
+            return term.mode_onehot
+    return torch.zeros(env.num_envs, 4, device=env.device)
+
+
 def claw_heading_rate_priv(
     env: ManagerBasedEnv,
 ) -> torch.Tensor:

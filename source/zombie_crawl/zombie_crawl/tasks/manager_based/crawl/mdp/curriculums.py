@@ -222,6 +222,195 @@ def difficulty_curriculum(
     return _state()
 
 
+# (rotate_lo, rotate_hi) stages the M3 dial walks through before the final stage (P3-4)
+_ROTATE_STAGES: tuple[tuple[float, float], ...] = ((5.0, 8.0), (10.0, 15.0), (18.0, 25.0))
+_FINAL_ROTATE = (30.0, 40.0)  # with |omega| >= 0.20: min product 0.20*30 = 6.0 = 1.5*S_pan
+
+
+def mode_stage_curriculum(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor | slice,
+    min_success: float = 0.3,
+    hold: float = 0.3,
+    check_interval: int = 100,
+    blend_iters: int = 50,
+    stuck_iters: int = 600,
+    m3_omega_min_final: float = 0.20,
+    rest_start_frac: float = 0.125,
+) -> dict:
+    """Phase-3 behavior-mode ladder (B.8), driving ``env.extras`` command-sampler dials.
+
+    ====  ==============================  ==============================================
+    St    commands available              advance when (every ``check_interval`` calls)
+    ====  ==============================  ==============================================
+    0     M1, M2 (the whole phase-2 mix)  phase-2 dials at their ceilings AND
+                                          ``success/M1``, ``success/M2`` >= min_success
+    1     + M4 (rest)                     ``success/M4`` >= min, M1/M2 >= hold
+    2     + M3 short segments             ``success/M3`` >= min, M1/M2/M4 >= hold
+    3     M3 segments grow (rotate dial)  ``success/M3`` >= min AT THE FINAL LENGTH,
+                                          earlier modes >= hold
+    4     full mix, all transitions       (none -- train to the fixed iteration count)
+    ====  ==============================  ==============================================
+
+    Dials written for :class:`~.commands.ModeMixCommand`: ``mode_mix`` (blended 50
+    iterations toward the stage target), ``rotate_segment_s``, ``m3_omega_min``, plus
+    ``rest_frac`` for the reset events (rest-pose starts, B.7). Monotonic: the stage never
+    regresses. Gate levels follow the owner decision (0.3, not the spec's 0.7 -- the
+    stochastic EMAs are noise-capped, phase-2 A.12-6/7). A stage stuck for ``stuck_iters``
+    RSL-RL iterations prints its gate inputs and STOPS the run (spec B.8).
+    ``env.cfg.mode_stage_lock`` (read live; Hydra-settable) forces a stage for debugging.
+    """
+    # LIVE reads of the env cfg gate fields: hydra applies ``env.<field>=`` overrides
+    # AFTER __post_init__, so the params dict captured at construction is stale --
+    # cfg fields are the single source of truth (params remain a fallback for callers
+    # that pass explicit values programmatically)
+    min_success = float(getattr(env.cfg, "mode_gate_min", min_success))
+    hold = float(getattr(env.cfg, "mode_hold", hold))
+    stuck_iters = int(getattr(env.cfg, "mode_stuck_iters", stuck_iters))
+    rest_start_frac = float(getattr(env.cfg, "rest_start_frac", rest_start_frac))
+
+    if "mode_stage" not in env.extras:
+        env.extras["mode_stage"] = 0
+        env.extras["mode_mix"] = (0.5, 0.5, 0.0, 0.0)
+        env.extras["mode_mix_target"] = (0.5, 0.5, 0.0, 0.0)
+        env.extras["rotate_stage"] = 0
+        env.extras["rotate_segment_s"] = _ROTATE_STAGES[0]
+        env.extras["m3_omega_min"] = 0.10
+        # rest starts active from stage 0 (with force_m4_ids first segments): the
+        # stage-0 re-climb must keep the rest gradient alive or the 20k-iter crawl
+        # attractor re-forms command-blind before M4 mix ever arrives
+        env.extras["rest_frac"] = rest_start_frac
+        env.extras["zombie_mode_stage_step"] = 0
+        env.extras["zombie_stage_entry_step"] = int(getattr(env, "common_step_counter", 0))
+        from zombie_crawl.tasks.manager_based.crawl.agents.rsl_rl_ppo_cfg import NUM_STEPS_PER_ENV
+
+        env.extras["zombie_nsp"] = int(NUM_STEPS_PER_ENV)
+        import zombie_crawl
+
+        print(
+            f"[CURRICULUM] mode_stage term ACTIVE -- zombie_crawl imported from: "
+            f"{zombie_crawl.__file__}",
+            flush=True,
+        )
+    env.extras["zombie_mode_stage_step"] += 1
+
+    # blend the live mix toward the stage target on EVERY call (~env step cadence):
+    # ~blend_iters * nsp calls = blend_iters RSL-RL iterations (B.8 "blend mixes over 50")
+    nsp = int(env.extras.get("zombie_nsp", 40))
+    alpha = min(1.0, 1.0 / max(1, blend_iters * nsp))
+    cur = torch.tensor(env.extras["mode_mix"], device=env.device)
+    tgt = torch.tensor(env.extras["mode_mix_target"], device=env.device)
+    cur = cur + alpha * (tgt - cur)
+    env.extras["mode_mix"] = tuple(float(v) for v in cur)
+
+    def _state() -> dict:
+        mix = env.extras["mode_mix"]
+        seg = env.extras["rotate_segment_s"]
+        return {
+            "stage": float(env.extras["mode_stage"]),
+            "mix_M1": mix[0], "mix_M2": mix[1], "mix_M3": mix[2], "mix_M4": mix[3],
+            "rotate_lo": float(seg[0]), "rotate_hi": float(seg[1]),
+            "m3_omega_min": float(env.extras["m3_omega_min"]),
+        }
+
+    def _set_stage(stage: int, mix: tuple, rotate_idx: int, m3_lo: float, rest: float) -> None:
+        env.extras["mode_stage"] = stage
+        env.extras["mode_mix_target"] = mix
+        env.extras["rotate_stage"] = rotate_idx
+        env.extras["rotate_segment_s"] = _ROTATE_STAGES[rotate_idx] if rotate_idx < 3 else _FINAL_ROTATE
+        env.extras["m3_omega_min"] = m3_lo
+        env.extras["rest_frac"] = rest
+        env.extras["zombie_stage_entry_step"] = int(getattr(env, "common_step_counter", 0))
+        print(f"[CURRICULUM] mode_stage -> {stage} (mix {mix}, seg {env.extras['rotate_segment_s']}, "
+              f"m3_lo {m3_lo})", flush=True)
+
+    lock = getattr(env.cfg, "mode_stage_lock", None)
+    if lock is not None:
+        stage = int(lock)
+        cur_stage = int(env.extras["mode_stage"])
+        if stage != cur_stage:
+            mixes = {(0, 0): ((0.5, 0.5, 0.0, 0.0), 0, 0.10, 0.0),
+                     # lock 1 mirrors the live stage-1 target (M4-heavy, rest starts);
+                     # locks exist to skip the ~700-iter ladder re-climb per restart
+                     (1, 0): ((0.30, 0.25, 0.0, 0.45), 0, 0.10, rest_start_frac),
+                     (2, 0): ((0.30, 0.25, 0.25, 0.20), 0, 0.10, rest_start_frac),
+                     (3, 0): ((0.30, 0.25, 0.25, 0.20), 0, 0.10, rest_start_frac),
+                     (4, 0): ((0.30, 0.25, 0.25, 0.20), 3, 0.20, rest_start_frac)}
+            mix, ridx, m3lo, rest = mixes[(stage, 0)]
+            _set_stage(stage, mix, ridx, m3lo, rest)
+        if stage == 3:  # locked 3 exercises the final segment length
+            env.extras["rotate_segment_s"] = _FINAL_ROTATE
+            env.extras["m3_omega_min"] = m3_omega_min_final
+        return _state()
+
+    if env.extras["zombie_mode_stage_step"] % check_interval != 0:
+        return _state()
+
+    stage = int(env.extras["mode_stage"])
+    entry = int(env.extras["zombie_stage_entry_step"])
+    steps = int(getattr(env, "common_step_counter", 0))
+    if stage < 4 and (steps - entry) >= stuck_iters * nsp:
+        gates = {
+            "v_target": float(env.v_target.mean()) if hasattr(env, "v_target") else 0.0,
+            "friction_scale": float(env.extras.get("friction_scale", 1.0)),
+            "difficulty": float(env.extras.get("difficulty", 0.0)),
+            "yaw_rate_max": float(env.extras.get("yaw_rate_max", 0.0)),
+            "yaw_stage": float(env.extras.get("yaw_rate_stage", 0.0)),
+            "success/M1": metrics.get_metric(env, "success/M1"),
+            "m1_abs_mean_r": metrics.get_metric(env, "m1_abs_mean_r"),
+            "m4_rest_frac": metrics.get_metric(env, "m4_rest_frac"),
+            "rest_joint_tol": float(getattr(env.cfg, "rest_joint_tol", 0.15)),
+            "m1_r_max": float(getattr(env.cfg, "m1_r_max", 0.05)),
+            "success/M2": metrics.get_metric(env, "success/M2"),
+            "success/M3": metrics.get_metric(env, "success/M3"),
+            "success/M4": metrics.get_metric(env, "success/M4"),
+        }
+        msg = f"[CURRICULUM] mode_stage STUCK at stage {stage} for {stuck_iters} iters; gates: {gates}"
+        print(msg, flush=True)
+        raise RuntimeError(msg)
+
+    s1 = metrics.get_metric(env, "success/M1")
+    s2 = metrics.get_metric(env, "success/M2")
+    s3 = metrics.get_metric(env, "success/M3")
+    s4 = metrics.get_metric(env, "success/M4")
+    cfg = env.cfg
+    cap_final = float(getattr(cfg, "yaw_rate_max_final", 0.30))
+    p2_ceilings = (
+        float(get_v_target(env).max()) >= float(cfg.v_target) - 1e-3
+        and float(env.extras.get("friction_scale", 1.0)) <= 1.0 + 1e-6
+        and float(env.extras.get("difficulty", 0.0)) >= 1.0 - 1e-6
+        and int(env.extras.get("yaw_rate_stage", 0)) >= 2
+        and float(env.extras.get("yaw_rate_max", 0.0)) >= cap_final - 1e-3
+    )
+    if stage == 0:
+        if p2_ceilings and s1 >= min_success and s2 >= min_success:
+            # owner calibration: M4-heavy stage 1 (0.45) -- at 0.20 exposure the 20k-iter
+            # crawl attractor never relinquished the gait under zero command
+            _set_stage(1, (0.30, 0.25, 0.0, 0.45), 0, 0.10, rest_start_frac)
+    elif stage == 1:
+        if s4 >= min_success and s1 >= hold and s2 >= hold:
+            _set_stage(2, (0.30, 0.25, 0.25, 0.20), 0, 0.10, rest_start_frac)
+    elif stage == 2:
+        if s3 >= min_success and s1 >= hold and s2 >= hold and s4 >= hold:
+            _set_stage(3, (0.30, 0.25, 0.25, 0.20), 1, 0.10, rest_start_frac)
+    elif stage == 3:
+        ridx = int(env.extras["rotate_stage"])
+        if s3 >= min_success and s1 >= hold and s2 >= hold and s4 >= hold:
+            if ridx < len(_ROTATE_STAGES):
+                ridx += 1
+                env.extras["rotate_stage"] = ridx
+                env.extras["rotate_segment_s"] = _ROTATE_STAGES[ridx]
+                print(f"[CURRICULUM] mode_stage 3: rotate_segment_s -> {_ROTATE_STAGES[ridx]}", flush=True)
+            elif tuple(env.extras["rotate_segment_s"]) != _FINAL_ROTATE:
+                env.extras["rotate_segment_s"] = _FINAL_ROTATE
+                env.extras["m3_omega_min"] = m3_omega_min_final
+                print(f"[CURRICULUM] mode_stage 3: FINAL segments {_FINAL_ROTATE} s, "
+                      f"m3_lo {m3_omega_min_final} (P3-4: 0.20*30=6.0 rad >= 1.5*S_pan)", flush=True)
+            else:
+                _set_stage(4, (0.30, 0.25, 0.25, 0.20), 3, m3_omega_min_final, rest_start_frac)
+    return _state()
+
+
 def yaw_rate_stage_curriculum(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor,

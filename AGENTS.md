@@ -16,6 +16,9 @@
 - Kill stale trainers with self-safe patterns: `pkill -9 -f 'scripts/trai[n].py'`
   (plain patterns match the wrapper shell and kill the tool call).
 - Everything runs through `../.venv/bin/python` (repo-parent venv, isaacsim 6.1, rsl-rl 5.5.1).
+- Before running the training, make sure the tensorboard is running and will logs will
+  be in a path that tensorboard is going to render. The user must be able to see
+  logs from multiple logs so the user could compare them
 
 ## Phase-2 command policy (phase2_v2.md is the spec; phase2.md is frozen — never edit)
 - Switch: Hydra `env.use_command_policy=true`; stage ladder in

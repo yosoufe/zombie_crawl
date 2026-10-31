@@ -118,6 +118,22 @@ START_POSES: dict[str, dict] = {
             "gripper": 0.0,
         },
     },
+    # phase 3 (B.7): rest start = the URDF-zero folded pose at rest height, spawned with
+    # ZERO joint noise (mdp.reset_start_pose) and counted as UPRIGHT (M4 practice starts).
+    # Physically identical to "folded"; it is a distinct start CLASS so the difficulty
+    # curriculum can allocate rest_frac without touching the upright/fallen split.
+    "rest": {
+        "pos": (0.0, 0.0, 0.0037),
+        "rot": (0.0, 0.0, 0.0),
+        "joint_pos": {
+            "shoulder_pan": 0.0,
+            "shoulder_lift": 0.0,
+            "elbow_flex": 0.0,
+            "wrist_flex": 0.0,
+            "wrist_roll": 0.0,
+            "gripper": 0.0,
+        },
+    },
 }
 
 
@@ -164,13 +180,15 @@ class CrawlSceneCfg(InteractiveSceneCfg):
 
 @configclass
 class CrawlCommandsCfg:
-    """Command terms -- ``yaw_rate_cmd`` (phase 2): per-env commanded yaw rate, resampled
-    uniformly every ``resampling_time_range`` seconds (staggered) and at every reset."""
+    """Command terms -- ``yaw_rate_cmd`` (phase 3): the ``ModeMixCommand`` two-channel
+    ``(vx, yaw_rate)`` stream with M1..M4 mode draws (B.7). The term name stays
+    ``yaw_rate_cmd`` so every existing consumer (obs, eval, pin/unpin, stage dial via
+    ``env.extras["yaw_rate_max"]``) keeps working; the legacy phase-2
+    ``UniformYawRateCommandCfg`` remains available in mdp for old-tree regression."""
 
-    yaw_rate_cmd: mdp.UniformYawRateCommandCfg = mdp.UniformYawRateCommandCfg(
+    yaw_rate_cmd: mdp.ModeMixCommandCfg = mdp.ModeMixCommandCfg(
         resampling_time_range=(5.0, 8.0),
         debug_vis=False,
-        zero_prob=0.2,
     )
 
 
@@ -208,6 +226,7 @@ class CrawlActionsCfg:
         },
         rescale_to_limits=True,
         alpha=0.3,
+        ema_alpha_zero=0.05,
     )
 
 
@@ -225,6 +244,9 @@ class CrawlObservationsCfg:
         # no absolute heading (the QMI8658 IMU has no magnetometer). The actor gets NO
         # measured heading / heading error / heading rate.
         yaw_rate_cmd = ObsTerm(func=mdp.yaw_rate_cmd)
+        # phase 3 (B.6): second command channel — commanded base forward speed [m/s],
+        # scaled by 1/0.15 so the input sits in ~[-1, 1]. Policy group 25-D -> 26-D.
+        vx_cmd = ObsTerm(func=mdp.vx_cmd)
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=Unoise(n_min=-0.2, n_max=0.2))
         joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
         joint_vel = ObsTerm(func=mdp.joint_vel, noise=Unoise(n_min=-0.5, n_max=0.5))
@@ -246,6 +268,9 @@ class CrawlObservationsCfg:
         # r: the filtered claw heading rate [rad/s] -- simulation-only, must NEVER enter
         # the policy group (mdp.claw_heading_rate; the robot cannot observe it)
         claw_heading_rate = ObsTerm(func=mdp.claw_heading_rate_priv)
+        # phase 3: the drawn behavior mode (M1..M4) one-hot — privileged ONLY. The real
+        # command stream is (vx, yawrate); the mode is a simulator-side bookkeeping label.
+        mode_onehot = ObsTerm(func=mdp.mode_onehot_priv)
 
         def __post_init__(self):
             self.enable_corruption = False
@@ -270,9 +295,12 @@ class CrawlRewardsCfg:
     # pays negative). The forward half keeps the posture gate (up); the backward half is the
     # plain negative tanh. Weight 2.5 keeps forward crawling clearly dominant over every
     # shaping/smoothing penalty. forward_progress (net displacement) remains the anti-park lever.
-    forward_velocity = RewTerm(func=mdp.forward_velocity_exp, weight=2.5)
+    # phase 3 (B.4): forward terms are gated ON by |vx_cmd| > deadband (the reward-design
+    # rule from phase 2 -- ungated tracking bumps under a zero command pay max for
+    # standing still and PPO collapses to sitting).
+    forward_velocity = RewTerm(func=mdp.forward_velocity_exp, weight=2.5, params={"gate_mode": True})
     # net claw-axis displacement (axis-free increments; P2-5), normalized by v_target. The anti-park lever.
-    forward_progress = RewTerm(func=mdp.forward_progress_lpf, weight=1.0, params={"tau_s": 1.0})
+    forward_progress = RewTerm(func=mdp.forward_progress_lpf, weight=1.0, params={"tau_s": 1.0, "gate_mode": True})
     # NEW: track the commanded claw heading rate. up * clamp(tanh(v_c/v_target),0,1) * mask *
     # exp(-((r - yaw_rate_cmd)/sigma)^2): pays ONLY while crawling forward (a zero command
     # tracked while standing still earns exactly nothing -- an ungated bump collapses PPO to
@@ -281,6 +309,16 @@ class CrawlRewardsCfg:
     # The factors inside are gates on this ONE term -- the only sanctioned exception to the
     # additive-terms rule (P2-4); NEVER multiply separate rewards.
     yaw_rate_tracking = RewTerm(func=mdp.yaw_rate_tracking, weight=1.5)
+    # ---- phase 3 (B.4) mode-specific terms; all self-gate on the command deadbands ----
+    # M3: rotate in place, don't translate (quadratic in base xy speed, rotate-only gated)
+    rotation_no_translation = RewTerm(func=mdp.rotation_no_translation, weight=-2.0)
+    # M4: zero command -> base and joints go still (2 s settle grace after each resample)
+    stillness_base = RewTerm(func=mdp.stillness_base, weight=-2.0)
+    stillness_joints = RewTerm(func=mdp.stillness_joints, weight=-0.05)
+    # M4: settle into the folded rest pose (exp kernel, smooth up-gate, zero-command gated)
+    rest_pose = RewTerm(func=mdp.rest_pose, weight=1.5)
+    rest_deviation = RewTerm(func=mdp.rest_deviation, weight=-1.0)
+    stop_actions = RewTerm(func=mdp.stop_actions, weight=-2.0)
     lateral_velocity = RewTerm(func=mdp.lateral_velocity, weight=-1.0)
     # anti-exploit terms
     overspeed = RewTerm(func=mdp.overspeed_penalty, weight=-2.0, params={"factor": 2.0})
@@ -322,7 +360,13 @@ class CrawlTerminationsCfg:
     # bootstrap), so doing nothing is no longer a viable strategy. The anchor is recorded
     # by reset_start_pose on every reset; it does NOT re-anchor on command resamples and
     # applies to fallen starts too.
-    stalled = DoneTerm(func=mdp.stalled, params={"min_displacement": 0.05, "stall_time_s": 12.0})
+    # phase 3 (B.5): the stall clock runs ONLY under a forward command (fwd_on) and
+    # re-anchors its window on every command resample / mode change -- a resting or
+    # rotating robot is not "stalled".
+    stalled = DoneTerm(
+        func=mdp.stalled,
+        params={"min_displacement": 0.05, "stall_time_s": 12.0, "mode_gate": True},
+    )
 
 
 @configclass
@@ -464,6 +508,12 @@ class CrawlCurriculumCfg:
             "check_interval": 100,
         },
     )
+    # phase 3 (B.8): behavior-mode ladder 0..4 (M1/M2 -> +M4 -> +M3 -> grow M3 segments ->
+    # full mix). Gate levels follow the owner decision 0.3 (phase-2 A.12-6/7: the stochastic
+    # per-mode EMAs are noise-capped; the spec's 0.7 is unreachable in-rollout). A stuck
+    # stage prints its gate inputs and aborts the run after ``stuck_iters`` RSL-RL iters.
+    # Params are (re)injected from the env fields in CrawlEnvCfg.__post_init__.
+    mode_stage = CurrTerm(func=mdp.mode_stage_curriculum, params={})
 
 
 @configclass
@@ -516,6 +566,34 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
     """Debug (read live by the stage curriculum): force a yaw-rate stage. ``0`` keeps
     steering locked off (rung R1: the actor keeps the always-zero yaw_rate_cmd input);
     ``1``/``2`` jump straight to that stage ignoring the gates. ``None`` = automatic."""
+    # -- phase 3 (spec §B) ----------------------------------------------------------
+    mode_gate_min: float = 0.3
+    """Per-mode success EMA gate for the mode-stage ladder advance (owner decision: 0.3 for
+    ALL stages — the stochastic EMAs are noise-capped, docs/phase2_report.md A.12-6/7; the
+    spec's 0.7 prose stays as the acceptance-level target, verified deterministically)."""
+    mode_hold: float = 0.3
+    """Minimum EMA success the EARLIER modes must hold at while a later stage unlocks."""
+    mode_stuck_iters: int = 600
+    """RSL-RL iterations a mode-stage may sit without advancing before the run aborts
+    with its gate inputs printed (spec B.8 stuck-stop)."""
+    mode_stage_lock: int | None = None
+    """Debug (read live by the mode-stage curriculum): force a behavior-mode stage
+    (0 = M1/M2 only, the L1 rung; ... 4 = full mix) ignoring the gates. ``None`` = auto."""
+    m1_r_max: float = 0.05
+    """``success/M1`` |mean claw-heading-rate| limit [rad/s] (spec B.8 initial 0.05).
+    Calibrate from the logged ``m1_abs_mean_r`` (measured +20 %), owner decision."""
+    rest_height: float = 0.0037
+    """``h_rest`` [m]: base height at the folded rest pose (measured spawn height,
+    docs/rest_pose.md — overrides the spec prose value 0.033; P3-3/P3-4 evidence)."""
+    rest_up_thresh: float = 0.95
+    """``rest_pose_ok`` (P3-3): minimum flatness gate value to count as level."""
+    rest_height_tol: float = 0.01
+    """``rest_pose_ok`` (P3-3): |base_z - h_rest| tolerance [m]."""
+    rest_joint_tol: float = 0.15
+    """``rest_pose_ok`` (P3-3): per-joint |q - q_rest| tolerance [rad]."""
+    rest_start_frac: float = 0.125
+    """Fraction of resets starting in the EXACT rest pose once the mode ladder reaches
+    stage 1 (B.7 rest-practice starts; 0 disables)."""
     use_box_termination: bool = False
     """Diagnostic: re-add the removed ``out_of_bounds`` termination (P2-7), ONLY for
     bisecting a failing rung (§A.11). Episodes otherwise always run to their end."""
@@ -593,9 +671,11 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
 
     def __post_init__(self):
         """Set up scene, curriculum, and command/obs switches."""
-        # physics & timing: 200 Hz physics, 50 Hz policy
+        # physics & timing: 200 Hz physics, 50 Hz policy.
+        # phase 3 (B.7): 20 -> 40 s so a segment of every mode (M3 at the FINAL 30-40 s
+        # rotate length + the 12 transition types) fits inside one episode.
         self.decimation = 4
-        self.episode_length_s = 20.0
+        self.episode_length_s = 40.0
         self.sim.dt = 0.005
         self.sim.render_interval = self.decimation
 
@@ -613,11 +693,24 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
 
         # yaw_rate_tracking filters are env tunables (P2-4/P2-6), injected from the fields
         # above so they are overridable without editing the reward defaults
-        self.rewards.yaw_rate_tracking.params = {
-            "sigma": 0.1,
-            "tau_r": self.yaw_rate_ema_tau_s,
-            "yaw_mask_s": self.yaw_mask_s,
-        }
+        # setdefault (not assignment): hydra applies ``env.rewards.yaw_rate_tracking.params.*``
+        # overrides as constructor args BEFORE __post_init__, and an unconditional dict
+        # assignment here silently discarded them (phase-2 A.12 finding: the sigma=0.05
+        # launch override never took effect -- only the top-level weight did).
+        self.rewards.yaw_rate_tracking.params.setdefault("sigma", 0.1)
+        self.rewards.yaw_rate_tracking.params.setdefault("tau_r", self.yaw_rate_ema_tau_s)
+        self.rewards.yaw_rate_tracking.params.setdefault("yaw_mask_s", self.yaw_mask_s)
+
+        # mode-stage ladder params, injected from the env fields (setdefault keeps any
+        # hydra ``env.curriculum.mode_stage.params.*`` overrides set at launch)
+        ms = self.curriculum.mode_stage.params
+        ms.setdefault("min_success", self.mode_gate_min)
+        ms.setdefault("hold", self.mode_hold)
+        ms.setdefault("check_interval", 100)
+        ms.setdefault("blend_iters", 50)
+        ms.setdefault("stuck_iters", self.mode_stuck_iters)
+        ms.setdefault("m3_omega_min_final", 0.20)
+        ms.setdefault("rest_start_frac", self.rest_start_frac)
 
         # diagnostic re-enable of the removed position box (P2-7 / §A.11)
         if self.use_box_termination:
@@ -644,6 +737,7 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
             self.curriculum.friction_scale = None
             self.curriculum.difficulty = None
             self.curriculum.yaw_rate_stage = None
+            self.curriculum.mode_stage = None
             self.events.apply_friction_scale = None
             # without curriculum the v_target is constant at its final value
             self.v_target_start = self.v_target
@@ -869,8 +963,12 @@ class CrawlEnvCfg(ManagerBasedRLEnvCfg):
         self.curriculum.friction_scale = None
         self.curriculum.difficulty = None
         self.curriculum.yaw_rate_stage = None
+        self.curriculum.mode_stage = None
         self.events.apply_friction_scale = None
         self.v_target_start = self.v_target
+        # play/eval draws from the FULL mix dial by default (the training ladder is absent;
+        # scripts/evaluate.py pins per-scenario modes explicitly)
+        self.commands.yaw_rate_cmd.mode_mix = (0.30, 0.25, 0.25, 0.20)
         self._setup_play_commands()
         if video_flags.play_video_training_spec:
             # training-spec play clip: keep the full population + disturbance + fallen starts
